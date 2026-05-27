@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+*.js
+*.d.ts
+*.js.map
+!jest.config.js
+!vitest.config.js
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Coverage
+coverage/
+
+# Secrets — NEVER commit
+*.pem
+*.key
+secret*
+wallet.json
+wallet*.key
+
+# Termux/Android artifacts
+*.swp
+*.swo
+*~
+ghtoken.txt
