@@ -8,7 +8,7 @@ import { createLogger } from '../../telemetry/logging/logger.js';
 
 // ── Types ────────────────────────────────────────────────────────────
 
-export type EventHandler = (event: NormalizedEvent) => void | Promise<void>;
+type EventHandler = (event: NormalizedEvent) => void | Promise<void>;
 
 // ── Dispatcher ───────────────────────────────────────────────────────
 

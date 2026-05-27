@@ -146,20 +146,23 @@ export function createDataProvider(
       const windowMs = signal.type === 'MOMENTUM' ? signal.windowSeconds * 1000 : Number.POSITIVE_INFINITY;
 
       // --- Check 10: Price impact of position size on bonding curve ---
-      let priceImpactBps: number | null = null;
+      // Parse bonding curve data ONCE and reuse for both price impact and market cap
+      let parsedBC: { virtualSolReserves: bigint; virtualTokenReserves: bigint; complete: boolean } | null = null;
       if (bondingCurveAccount?.data && bondingCurveAccount.data.length >= 49) {
-        const parsed = parseBondingCurveData(bondingCurveAccount.data);
-        if (parsed && parsed.virtualSolReserves > 0n) {
-          try {
-            const solPriceUsd = await container.solPriceOracle.getSolPriceUsd();
-            const positionSizeLamports = computePositionSizeLamports(solPriceUsd);
-            priceImpactBps = Number((positionSizeLamports * 10000n) / (parsed.virtualSolReserves + positionSizeLamports));
-          } catch (err: unknown) {
-            logger.warn('Failed to compute price impact — SOL price unavailable', {
-              mint: mint.slice(0, 12),
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
+        parsedBC = parseBondingCurveData(bondingCurveAccount.data);
+      }
+
+      let priceImpactBps: number | null = null;
+      if (parsedBC && parsedBC.virtualSolReserves > 0n) {
+        try {
+          const solPriceUsd = await container.solPriceOracle.getSolPriceUsd();
+          const positionSizeLamports = computePositionSizeLamports(solPriceUsd);
+          priceImpactBps = Number((positionSizeLamports * 10000n) / (parsedBC.virtualSolReserves + positionSizeLamports));
+        } catch (err: unknown) {
+          logger.warn('Failed to compute price impact — SOL price unavailable', {
+            mint: mint.slice(0, 12),
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
       }
 
@@ -188,21 +191,18 @@ export function createDataProvider(
       // Price = virtualSolReserves / virtualTokenReserves (in SOL per token)
       // Market cap = price * supply in lamports
       let marketCapUsd: number | null = null;
-      if (bondingCurveAccount?.data && bondingCurveAccount.data.length >= 49 && supply?.value) {
-        const parsed = parseBondingCurveData(bondingCurveAccount.data);
-        if (parsed && parsed.virtualTokenReserves > 0n) {
-          try {
-            const pricePerTokenLamports = parsed.virtualSolReserves * 10n ** 9n / parsed.virtualTokenReserves;
-            const totalSupplyRaw = BigInt(supply.value.amount);
-            const marketCapLamports = pricePerTokenLamports * totalSupplyRaw;
-            const solPriceUsd = await container.solPriceOracle.getSolPriceUsd();
-            marketCapUsd = Number(marketCapLamports) / 1e9 * solPriceUsd;
-          } catch (err: unknown) {
-            logger.warn('Failed to calculate market cap', {
-              mint: mint.slice(0, 12),
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
+      if (parsedBC && parsedBC.virtualTokenReserves > 0n && supply?.value) {
+        try {
+          const pricePerTokenLamports = parsedBC.virtualSolReserves * 10n ** 9n / parsedBC.virtualTokenReserves;
+          const totalSupplyRaw = BigInt(supply.value.amount);
+          const marketCapLamports = pricePerTokenLamports * totalSupplyRaw;
+          const solPriceUsd = await container.solPriceOracle.getSolPriceUsd();
+          marketCapUsd = Number(marketCapLamports) / 1e9 * solPriceUsd;
+        } catch (err: unknown) {
+          logger.warn('Failed to calculate market cap', {
+            mint: mint.slice(0, 12),
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
       }
 
@@ -246,7 +246,11 @@ export function createDataProvider(
 
     async getPositionData(tradeId: string): Promise<PositionData | null> {
       const pos = positionRegistry.get(tradeId);
-      if (!pos) return null;
+      if (!pos) {
+        // Clean up highest price tracker for exited positions to prevent memory leak
+        highestPriceTracker.delete(tradeId);
+        return null;
+      }
 
       // Fetch current price from bonding curve
       const mintPk = new PublicKey(pos.mint);

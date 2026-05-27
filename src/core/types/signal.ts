@@ -8,7 +8,7 @@ import type { MintAddress } from './token.js';
 import type { WalletAddress } from './wallet.js';
 
 /** Signal type discriminator */
-export type SignalType = 'LAUNCH' | 'MOMENTUM' | 'MIGRATION' | 'LIQUIDITY_PHASE' | 'WASH_TRADE';
+export type SignalType = 'LAUNCH' | 'MOMENTUM' | 'MIGRATION' | 'LIQUIDITY_PHASE' | 'WASH_TRADE' | 'BUNDLE';
 
 /** Unique signal identifier */
 export type SignalId = string;
@@ -58,6 +58,19 @@ export interface WashTradeSignal extends BaseSignal {
   readonly washReasons: readonly string[];
 }
 
+/** Bundle detection: clustered wallets bought significant supply in early window */
+export interface BundleSignal extends BaseSignal {
+  readonly type: 'BUNDLE';
+  /** Percentage of total supply bought by clustered wallets (0-100). */
+  readonly bundlePct: number;
+  /** Number of wallets in the detected cluster. */
+  readonly clusteredWalletCount: number;
+  /** Total number of buy transactions in the early window. */
+  readonly totalBuyCount: number;
+  /** Duration of the early window in milliseconds. */
+  readonly windowMs: number;
+}
+
 /** Parsed token launch event (protocol-agnostic). Used by detectors. */
 export interface LaunchEvent {
   readonly mint: MintAddress;
@@ -71,4 +84,4 @@ export interface LaunchEvent {
 }
 
 /** Union of all signal types */
-export type Signal = LaunchSignal | MomentumSignal | MigrationSignal | LiquidityPhaseSignal | WashTradeSignal;
+export type Signal = LaunchSignal | MomentumSignal | MigrationSignal | LiquidityPhaseSignal | WashTradeSignal | BundleSignal;

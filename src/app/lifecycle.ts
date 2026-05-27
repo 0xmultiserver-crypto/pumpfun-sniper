@@ -17,6 +17,7 @@
 import type { ServiceContainer } from './container.js';
 import { GRACEFUL_SHUTDOWN_TIMEOUT_MS } from '../core/constants/timeouts.js';
 import { createLogger } from '../telemetry/logging/logger.js';
+import { stopMetricsServer } from '../telemetry/metrics/httpServer.js';
 
 const logger = createLogger('app:lifecycle');
 
@@ -127,13 +128,18 @@ export class LifecycleManager {
       }
 
       // Step 4: Close connections
-      logger.info('Step 4/5: Closing connections...');
+      logger.info('Step 4/6: Closing connections...');
       await this.container.destroy();
       logger.info('  All connections closed');
 
-      // Step 5: Final log
+      // Step 5: Stop metrics server
+      logger.info('Step 5/6: Stopping metrics server...');
+      await stopMetricsServer();
+      logger.info('  Metrics server stopped');
+
+      // Step 6: Final log
       const elapsed = Date.now() - shutdownStart;
-      logger.info('Step 5/5: Shutdown complete', { shutdownTimeMs: elapsed });
+      logger.info('Step 6/6: Shutdown complete', { shutdownTimeMs: elapsed });
       logger.info('=== PUMPFUN SNIPER SHUT DOWN CLEANLY ===');
     } catch (err: unknown) {
       logger.error('Error during shutdown', {

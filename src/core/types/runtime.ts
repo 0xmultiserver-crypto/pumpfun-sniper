@@ -5,4 +5,4 @@
  */
 
 /** Runtime health status */
-export type HealthStatus = 'HEALTHY' | 'DEGRADED' | 'UNHEALTHY';
+// All exports removed — HealthStatus was never imported.

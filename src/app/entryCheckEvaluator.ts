@@ -30,21 +30,6 @@ const logger = createLogger('evaluator:entryCheck');
 // Types
 // ---------------------------------------------------------------------------
 
-/** Raw data fetched by dataProvider for entry check evaluation. */
-export interface RawEntryData {
-  readonly mint: MintAddress;
-  readonly mintAccount: AccountInfo<Buffer> | null;
-  readonly bondingCurveAccount: AccountInfo<Buffer> | null;
-  readonly metadataAccount: AccountInfo<Buffer> | null;
-  readonly largestAccounts: readonly { readonly address: PublicKey | string; readonly amount: string }[] | null;
-  readonly totalSupply: string | null;
-  readonly launchSignals: readonly LaunchSignal[];
-  readonly creatorAddress: WalletAddress | null;
-  readonly isCreatorBlacklisted: boolean;
-  readonly creatorLaunchCount: number;
-  readonly creatorScore: number | null;
-}
-
 // ---------------------------------------------------------------------------
 // Individual evaluators
 // ---------------------------------------------------------------------------

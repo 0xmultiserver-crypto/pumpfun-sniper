@@ -441,7 +441,7 @@ export class ServiceContainer {
   get strategy(): IStrategy {
     if (this._strategy === null) {
       throw new Error(
-        'Strategy must be initialized via bootstrap. Call bootstrap.start() first.',
+        'Strategy must be initialized. Call container.setStrategy() first.',
       );
     }
     return this._strategy;

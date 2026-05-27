@@ -87,7 +87,7 @@ export interface EntryCheckData {
 }
 
 /** Individual check result. */
-export interface CheckResult {
+interface CheckResult {
   readonly name: string;
   readonly passed: boolean;
   readonly reason: string;

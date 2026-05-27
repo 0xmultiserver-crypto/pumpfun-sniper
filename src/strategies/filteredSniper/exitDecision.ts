@@ -238,7 +238,7 @@ export function evaluateExit(data: PositionData): ExitDecisionResult {
     };
   }
 
-  // --- Check 3: Take profit ---
+  // --- Check 4: Take profit ---
   if (pnlPercent >= TAKE_PROFIT_PERCENT) {
     logger.info('Exit decision: TAKE PROFIT triggered', {
       tradeId: data.tradeId,

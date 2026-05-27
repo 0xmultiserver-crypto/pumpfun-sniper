@@ -35,6 +35,34 @@ export async function executeBuy(params: BuyParams, runtime: ExecutionRuntime): 
   const mint = new PublicKey(params.mint);
   const user = container.signer.getPublicKey();
 
+  // ── Balance Check (EARLY — before risk guards + position reserve) ───
+  const walletBalance = await container.connection.getBalance(user);
+  const balanceLamports = BigInt(walletBalance);
+
+  // Minimum balance to execute ANY trade (position size + fees + rent)
+  // ~$1 position + 0.001 SOL fees + 0.002 SOL rent ≈ 0.015 SOL
+  const MIN_TRADE_BALANCE = 15_000_000n; // 0.015 SOL
+
+  if (balanceLamports < MIN_TRADE_BALANCE) {
+    const balanceSol = (walletBalance / 1e9).toFixed(6);
+    logger.error('BUY BLOCKED — wallet balance too low to trade, activating kill switch', {
+      tradeId,
+      balanceLamports: walletBalance.toString(),
+      balanceSol,
+      minTradeSol: '0.015',
+    });
+    container.killSwitch.kill(
+      `Wallet balance too low to trade: ${balanceSol} SOL (min 0.015 SOL)`,
+      'balance-guard',
+    );
+    return {
+      success: false,
+      tradeId,
+      signature: null,
+      error: `Wallet balance too low to trade: ${balanceSol} SOL — kill switch activated`,
+    };
+  }
+
   // ── Risk Guard Checks ──────────────────────────────────────────
   const riskCheck = await runRiskGuards(container);
   if (!riskCheck.allowed) {
@@ -80,29 +108,31 @@ export async function executeBuy(params: BuyParams, runtime: ExecutionRuntime): 
     tradeId,
   });
 
-  // ── Balance Check ───────────────────────────────────────────────
-  const walletBalance = await container.connection.getBalance(
-    container.signer.getPublicKey(),
-  );
-  // Need position size + buffer for TX fees (~0.001 SOL = 1_000_000 lamports)
+  // ── Balance Check (position size) ────────────────────────────────
+  // Balance already checked above for MIN_TRADE_BALANCE (0.015 SOL).
+  // Now check if enough for actual position size + TX fees.
   const minRequired = positionSizeLamports + 1_000_000n;
-  if (walletBalance < Number(minRequired)) {
+
+  if (balanceLamports < minRequired) {
     const balanceSol = (walletBalance / 1e9).toFixed(6);
     const requiredSol = (Number(minRequired) / 1e9).toFixed(6);
-    logger.warn('BUY BLOCKED — insufficient balance', {
+    logger.warn('BUY BLOCKED — insufficient balance for position size, activating kill switch', {
       tradeId,
       balanceLamports: walletBalance.toString(),
       balanceSol,
       requiredLamports: minRequired.toString(),
       requiredSol,
     });
-    // Release position slot
+    container.killSwitch.kill(
+      `Insufficient balance: ${balanceSol} SOL < ${requiredSol} SOL required`,
+      'balance-guard',
+    );
     positionRegistry.transition(tradeId, 'EXITED', 'insufficient balance');
     return {
       success: false,
       tradeId,
       signature: null,
-      error: `Insufficient balance: ${balanceSol} SOL < ${requiredSol} SOL required`,
+      error: `Insufficient balance: ${balanceSol} SOL < ${requiredSol} SOL — kill switch activated`,
     };
   }
   logger.info('Balance check passed', {

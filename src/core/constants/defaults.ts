@@ -26,8 +26,8 @@ export const DEFAULT_MAX_POSITION_SIZE_USD = 5 as const;
 /** Dynamic position sizing — base (center) $1.00 */
 export const DEFAULT_BASE_POSITION_SIZE_USD = 1 as const;
 
-/** Take profit — LOCKED: +500% */
-export const DEFAULT_TAKE_PROFIT_PCT = 500 as const;
+/** Take profit — LOCKED: +1500% */
+export const DEFAULT_TAKE_PROFIT_PCT = 1500 as const;
 
 /** Stop loss — LOCKED: -50% */
 export const DEFAULT_STOP_LOSS_PCT = 50 as const;
@@ -36,7 +36,7 @@ export const DEFAULT_STOP_LOSS_PCT = 50 as const;
 export const DEFAULT_TRAILING_ACTIVATION_PCT = 30 as const;
 
 /** Trailing stop — drops this % from highest price to trigger sell. 0 = disabled. */
-export const DEFAULT_TRAILING_STOP_PCT = 15 as const;
+export const DEFAULT_TRAILING_STOP_PCT = 25 as const;
 
 /** Timeout — LOCKED: 60 minutes (3600 seconds) */
 export const DEFAULT_TIMEOUT_SECONDS = 3600 as const;
@@ -167,6 +167,17 @@ export const DEFAULT_SCALE_OUT_TIERS: ReadonlyArray<{ readonly triggerPct: numbe
 
 /** Max transaction retry attempts */
 export const DEFAULT_MAX_TX_RETRIES = 2 as const;
+
+// ---------------------------------------------------------------------------
+// Jito MEV Protection
+// ---------------------------------------------------------------------------
+
+/**
+ * Default Jito tip amount in lamports.
+ * 10,000 lamports = 0.00001 SOL.
+ * Adjust based on network conditions / desired inclusion priority.
+ */
+export const JITO_TIP_LAMPORTS = 10_000 as const;
 
 /** Delay between transaction retries in ms */
 export const DEFAULT_TX_RETRY_DELAY_MS = 1_000 as const;

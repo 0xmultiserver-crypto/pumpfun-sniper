@@ -101,6 +101,34 @@ export const solPriceUsd = new Gauge({
   registers: [register],
 });
 
+/** Rent reclaimed from closed token accounts. */
+export const rentReclaimedLamports = new Counter({
+  name: 'pumpfun_rent_reclaimed_lamports',
+  help: 'Total lamports reclaimed from closed token accounts',
+  registers: [register],
+});
+
+/** Number of token accounts closed for rent reclaim. */
+export const rentReclaimCount = new Counter({
+  name: 'pumpfun_rent_reclaim_count',
+  help: 'Total token accounts closed for rent reclaim',
+  registers: [register],
+});
+
+/** Jito bundles submitted. */
+export const jitoBundlesTotal = new Counter({
+  name: 'pumpfun_jito_bundles_total',
+  help: 'Total Jito bundle submissions attempted',
+  registers: [register],
+});
+
+/** Jito bundle failures. */
+export const jitoFailuresTotal = new Counter({
+  name: 'pumpfun_jito_failures_total',
+  help: 'Total Jito bundle submission failures',
+  registers: [register],
+});
+
 // ---------------------------------------------------------------------------
 // Increment helpers
 // ---------------------------------------------------------------------------
@@ -170,6 +198,12 @@ export function recordWsReconnect(): void {
 /** Set the current SOL/USD price gauge. */
 export function setSolPrice(price: number): void {
   solPriceUsd.set(price);
+}
+
+/** Record a rent reclaim. */
+export function recordRentReclaim(lamports: bigint): void {
+  rentReclaimedLamports.inc(Number(lamports));
+  rentReclaimCount.inc();
 }
 
 // ---------------------------------------------------------------------------

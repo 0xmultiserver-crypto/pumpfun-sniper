@@ -105,6 +105,9 @@ export class CooldownManager {
   clearCooldown(): void {
     this.cooldownExpiresAt = 0;
     logger.warn('Cooldown manually cleared');
+
+    // Persist cleared state to DB (fire-and-forget)
+    void this.saveToDb();
   }
 
   /**

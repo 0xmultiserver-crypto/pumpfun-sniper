@@ -18,8 +18,6 @@ import { executeBuy } from './execution/buyExecutor.js';
 import { executeSell } from './execution/sellExecutor.js';
 import type { ExecutionRuntime } from './execution/runtime.js';
 
-export { buildUserAtaCreateInstruction } from '../execution/tx/ataBuilder.js';
-
 const pumpSdk = new PumpSdk();
 
 /** Check if an execution error is non-retryable. */

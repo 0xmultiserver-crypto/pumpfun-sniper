@@ -2,7 +2,7 @@
  * Filtered Sniper Strategy
  *
  * The main strategy class that orchestrates:
- *   1. Entry evaluation (all 9 checks)
+ *   1. Entry evaluation (all 10 checks)
  *   2. Position monitoring
  *   3. Exit evaluation (TP/SL/timeout)
  *
@@ -109,7 +109,7 @@ export interface SellResult {
 }
 
 /** Strategy state. */
-export type StrategyState = 'IDLE' | 'RUNNING' | 'STOPPED';
+type StrategyState = 'IDLE' | 'RUNNING' | 'STOPPED';
 
 // ---------------------------------------------------------------------------
 // FilteredSniperStrategy
@@ -137,7 +137,7 @@ export class FilteredSniperStrategy implements IStrategy {
     dataProvider: StrategyDataProvider,
     executionDelegate: StrategyExecutionDelegate,
     positionSizer?: DynamicPositionSizer,
-    monitorPollMs: number = 2_000,
+    monitorPollMs: number = 1_000,
   ) {
     this.dataProvider = dataProvider;
     this.executionDelegate = executionDelegate;
@@ -238,7 +238,7 @@ export class FilteredSniperStrategy implements IStrategy {
     // Fetch entry check data
     const checkData = await this.dataProvider.getEntryCheckData(signal);
 
-    // Evaluate all 9 checks
+    // Evaluate all 10 checks
     const decision = evaluateEntry(checkData);
 
     if (!decision.allowed) {
@@ -251,7 +251,7 @@ export class FilteredSniperStrategy implements IStrategy {
       return decision;
     }
 
-    // ALL 9 CHECKS PASSED — execute buy
+    // ALL 10 CHECKS PASSED — execute buy
     // Calculate dynamic position size if sizer available
     let positionSizeUsd: number = POSITION_SIZE_USD;
     if (this.positionSizer !== null) {
@@ -271,7 +271,7 @@ export class FilteredSniperStrategy implements IStrategy {
       });
     }
 
-    logger.info('ALL 9 entry checks passed — executing buy', {
+    logger.info('ALL 10 entry checks passed — executing buy', {
       mint,
       passedCount: decision.passedCount,
       positionSizeUsd,

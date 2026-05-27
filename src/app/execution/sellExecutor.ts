@@ -22,6 +22,7 @@ import type { ExecutionRuntime } from './runtime.js';
 import { recordPnlAndRisk } from './pnlRecorder.js';
 import { saveTrade } from './tradeRecorder.js';
 import { getConfirmedSellAmountSol } from './onChainAccounting.js';
+import { reclaimSingleAccount } from './rentReclaimer.js';
 
 const logger = createLogger('app:execution:sell');
 
@@ -168,8 +169,8 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
 
         const jupiterProvider = new JupiterProvider();
 
-        const tokenAmount = await getUserTokenBalance(user, mint, tokenProgram);
-        if (tokenAmount === 0n) {
+        const graduatedTokenAmount = await getUserTokenBalance(user, mint, tokenProgram);
+        if (graduatedTokenAmount === 0n) {
           logger.error('No token balance in user ATA — cannot sell graduated token', { tradeId });
           return { success: false, signature: null, error: 'No token balance in user ATA' };
         }
@@ -178,7 +179,7 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
         const quote = await jupiterProvider.quote({
           mint: pos.mint as MintAddress,
           direction: 'SELL',
-          amountLamports: tokenAmount,
+          amountLamports: graduatedTokenAmount,
           slippageBps: SLIPPAGE_BPS,
         });
 
@@ -250,7 +251,7 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
           side: 'SELL',
           status: confirmationError ? 'FAILED' : 'CONFIRMED',
           amountSol,
-          amountTokens: tokenAmount,
+          amountTokens: graduatedTokenAmount,
           signature,
           slot: null,
           submittedAt: nowMs(),
@@ -266,6 +267,22 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
         // Untrack position (only on confirmed success)
         positionRegistry.transition(tradeId, 'EXITED', params.reason);
         logger.info('Position untracked', { tradeId });
+
+        // Fire-and-forget: reclaim rent from empty token account
+        reclaimSingleAccount({
+          connection: container.connection,
+          mint,
+          owner: user,
+          tokenProgram,
+          txBuilder: container.txBuilder,
+          sendCoordinator: container.sendCoordinator,
+        }).catch((err: unknown) => {
+          logger.warn('Post-sell rent reclaim failed (non-blocking)', {
+            tradeId,
+            mint: pos.mint,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
 
         // Issue 4 fix: Calculate actual P&L from entry/exit SOL amounts
         const entrySolLamports = pos.entryAmountSol ?? 0n;
@@ -428,6 +445,22 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
     // Untrack position (only on confirmed success)
     positionRegistry.transition(tradeId, 'EXITED', params.reason);
     logger.info('Position untracked', { tradeId });
+
+    // Fire-and-forget: reclaim rent from empty token account
+    reclaimSingleAccount({
+      connection: container.connection,
+      mint,
+      owner: user,
+      tokenProgram,
+      txBuilder: container.txBuilder,
+      sendCoordinator: container.sendCoordinator,
+    }).catch((err: unknown) => {
+      logger.warn('Post-sell rent reclaim failed (non-blocking)', {
+        tradeId,
+        mint: pos.mint,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
 
     // Issue 4 fix: Calculate actual P&L from confirmed on-chain trade amounts
     const entrySolLamports = pos.entryAmountSol ?? 0n;

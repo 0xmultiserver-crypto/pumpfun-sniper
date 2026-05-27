@@ -9,6 +9,7 @@ import type {
   MigrationSignal,
   LiquidityPhaseSignal,
   WashTradeSignal,
+  BundleSignal,
 } from '../../core/types/signal.js';
 import type { WalletAddress } from '../../core/types/wallet.js';
 
@@ -48,6 +49,8 @@ function reconstructSignal(row: SignalRow): Signal {
       return { ...base, ...data } as LiquidityPhaseSignal;
     case 'WASH_TRADE':
       return { ...base, ...data } as WashTradeSignal;
+    case 'BUNDLE':
+      return { ...base, ...data } as BundleSignal;
     default: {
       const _exhaustive: never = base.type;
       throw new Error(`Unknown signal type: ${_exhaustive as string}`);
