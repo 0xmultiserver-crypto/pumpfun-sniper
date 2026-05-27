@@ -110,6 +110,7 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
     isPermanentError,
   } = runtime;
   const tradeId = params.tradeId;
+  const sellPct = params.sellPct ?? 100;
   const sellSendRunId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const pos = positionRegistry.get(tradeId);
   logger.info('EXECUTE SELL', { tradeId, sellSendRunId, reason: params.reason, mint: pos?.mint });
@@ -170,7 +171,10 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
         const jupiterProvider = new JupiterProvider();
 
         const graduatedTokenAmount = await getUserTokenBalance(user, mint, tokenProgram);
-        if (graduatedTokenAmount === 0n) {
+        const partialTokenAmount = sellPct < 100
+          ? graduatedTokenAmount * BigInt(sellPct) / 100n
+          : graduatedTokenAmount;
+        if (partialTokenAmount === 0n) {
           logger.error('No token balance in user ATA — cannot sell graduated token', { tradeId });
           return { success: false, signature: null, error: 'No token balance in user ATA' };
         }
@@ -179,7 +183,7 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
         const quote = await jupiterProvider.quote({
           mint: pos.mint as MintAddress,
           direction: 'SELL',
-          amountLamports: graduatedTokenAmount,
+          amountLamports: partialTokenAmount,
           slippageBps: SLIPPAGE_BPS,
         });
 
@@ -251,7 +255,7 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
           side: 'SELL',
           status: confirmationError ? 'FAILED' : 'CONFIRMED',
           amountSol,
-          amountTokens: graduatedTokenAmount,
+          amountTokens: partialTokenAmount,
           signature,
           slot: null,
           submittedAt: nowMs(),
@@ -300,6 +304,9 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
 
       // ── Bonding Curve Sell (not graduated) ──────────────────────
       tokenAmount = await getUserTokenBalance(user, mint, tokenProgram);
+      if (sellPct < 100) {
+        tokenAmount = tokenAmount * BigInt(sellPct) / 100n;
+      }
       if (tokenAmount === 0n) {
         logger.error('No token balance in user ATA — cannot sell', { tradeId });
         return { success: false, signature: null, error: 'No token balance in user ATA' };

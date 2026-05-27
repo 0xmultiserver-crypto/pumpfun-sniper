@@ -99,6 +99,8 @@ export interface SellParams {
   readonly mint: MintAddress;
   readonly reason: ExitReason;
   readonly slippageBps: number;
+  /** Percentage of current token balance to sell (1-100). Default: 100 (full sell). */
+  readonly sellPct?: number;
 }
 
 /** Sell result (execution layer → strategy). */
@@ -351,17 +353,27 @@ export class FilteredSniperStrategy implements IStrategy {
           mint: positionData.mint,
           reason: exitDecision.reason,
           slippageBps: SLIPPAGE_BPS,
+          sellPct: exitDecision.sellPct,
         });
       } finally {
         this.exitingTrades.delete(tradeId);
       }
 
       if (sellResult.success) {
-        logger.info('Exit executed successfully', {
-          tradeId,
-          reason: exitDecision.reason,
-          signature: sellResult.signature,
-        });
+        // For SCALE_OUT: re-add to monitoring so next tier can trigger
+        if (exitDecision.reason === 'SCALE_OUT') {
+          this.monitoredTrades.add(tradeId);
+          logger.info('Scale-out partial sell complete, re-monitoring for next tier', {
+            tradeId,
+            sellPct: exitDecision.sellPct,
+          });
+        } else {
+          logger.info('Exit executed successfully', {
+            tradeId,
+            reason: exitDecision.reason,
+            signature: sellResult.signature,
+          });
+        }
       } else {
         logger.error('Exit execution failed — re-adding to monitor', {
           tradeId,
