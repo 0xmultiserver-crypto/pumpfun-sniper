@@ -33,7 +33,7 @@ export const DEFAULT_TAKE_PROFIT_PCT = 1500 as const;
 export const DEFAULT_STOP_LOSS_PCT = 50 as const;
 
 /** Trailing stop — activates after this % profit from entry. 0 = always active. */
-export const DEFAULT_TRAILING_ACTIVATION_PCT = 30 as const;
+export const DEFAULT_TRAILING_ACTIVATION_PCT = 70 as const;
 
 /** Trailing stop — drops this % from highest price to trigger sell. 0 = disabled. */
 export const DEFAULT_TRAILING_STOP_PCT = 25 as const;
