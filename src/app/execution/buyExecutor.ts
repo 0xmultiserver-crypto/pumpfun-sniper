@@ -45,7 +45,27 @@ export async function executeBuy(params: BuyParams, runtime: ExecutionRuntime): 
 
   if (balanceLamports < MIN_TRADE_BALANCE) {
     const balanceSol = (walletBalance / 1e9).toFixed(6);
-    logger.error('BUY BLOCKED — wallet balance too low to trade, activating kill switch', {
+    const activePositions = positionRegistry.getActiveCount();
+
+    if (activePositions > 0) {
+      // Active positions exist — block buy but DON'T kill switch
+      // Bot must keep running to monitor and sell existing positions
+      logger.warn('BUY BLOCKED — balance too low, but active positions still monitored', {
+        tradeId,
+        balanceSol,
+        activePositions,
+        minTradeSol: '0.015',
+      });
+      return {
+        success: false,
+        tradeId,
+        signature: null,
+        error: `Balance too low to buy: ${balanceSol} SOL — ${activePositions} positions still active`,
+      };
+    }
+
+    // No active positions — safe to kill switch
+    logger.error('BUY BLOCKED — wallet balance too low, no active positions, activating kill switch', {
       tradeId,
       balanceLamports: walletBalance.toString(),
       balanceSol,
@@ -116,11 +136,29 @@ export async function executeBuy(params: BuyParams, runtime: ExecutionRuntime): 
   if (balanceLamports < minRequired) {
     const balanceSol = (walletBalance / 1e9).toFixed(6);
     const requiredSol = (Number(minRequired) / 1e9).toFixed(6);
-    logger.warn('BUY BLOCKED — insufficient balance for position size, activating kill switch', {
+    const activePositions = positionRegistry.getActiveCount();
+
+    if (activePositions > 0) {
+      // Active positions exist — block buy but DON'T kill switch
+      logger.warn('BUY BLOCKED — insufficient balance for position, active positions still monitored', {
+        tradeId,
+        balanceSol,
+        requiredSol,
+        activePositions,
+      });
+      positionRegistry.transition(tradeId, 'EXITED', 'insufficient balance');
+      return {
+        success: false,
+        tradeId,
+        signature: null,
+        error: `Insufficient balance: ${balanceSol} SOL < ${requiredSol} SOL — ${activePositions} positions still active`,
+      };
+    }
+
+    // No active positions — safe to kill switch
+    logger.warn('BUY BLOCKED — insufficient balance, no active positions, activating kill switch', {
       tradeId,
-      balanceLamports: walletBalance.toString(),
       balanceSol,
-      requiredLamports: minRequired.toString(),
       requiredSol,
     });
     container.killSwitch.kill(

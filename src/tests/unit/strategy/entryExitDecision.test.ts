@@ -258,18 +258,18 @@ describe('evaluateExit', () => {
     expect(result.reason).toBe('STOP_LOSS');
   });
 
-  it('TRAILING_STOP triggers when price drops 15% from highest', () => {
-    // Entry=100, highest=200 (+100%), current=168 (-16% from high)
-    // Trailing 15% → stop at 200*0.85 = 170. 168 < 170 → trigger
+  it('TRAILING_STOP triggers when price drops 25% from highest', () => {
+    // Entry=100, highest=200 (+100%), current=148 (-26% from high)
+    // Trailing 25% → stop at 200*0.75 = 150. 148 < 150 → trigger
     const data = makePositionData({
       entryPriceLamports: 1_000_000_000n,
       highestPriceLamports: 2_000_000_000n,
-      currentPriceLamports: 1_680_000_000n,
+      currentPriceLamports: 1_480_000_000n,
     });
     const result = evaluateExit(data);
     expect(result.shouldExit).toBe(true);
     expect(result.reason).toBe('TRAILING_STOP');
-    expect(result.pnlPercent).toBeCloseTo(68, 0); // +68% from entry
+    expect(result.pnlPercent).toBeCloseTo(48, 0); // +48% from entry
   });
 
   it('TRAILING_STOP does NOT trigger when price within trailing range', () => {
