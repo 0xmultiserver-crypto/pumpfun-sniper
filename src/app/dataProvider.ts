@@ -17,6 +17,7 @@ import { createLogger } from '../telemetry/logging/logger.js';
 import { deriveBondingCurvePDA } from '../adapters/protocols/pumpfun/shared.js';
 import { parseBondingCurveData } from '../adapters/protocols/pumpfun/tokenParser.js';
 import { METADATA_PROGRAM_ID } from '../core/constants/programs.js';
+import { nowMs } from '../core/utils/time.js';
 import {
   CREATOR_HISTORY_MAX_LAUNCHES,
   CREATOR_HISTORY_WINDOW_MS,
@@ -176,6 +177,35 @@ export function createDataProvider(
         }
       }
 
+      // Calculate seconds since launch for late momentum detection
+      const launchTimestamp = latestLaunch?.timestamp ?? null;
+      const secondsSinceLaunch = launchTimestamp !== null
+        ? Math.floor((nowMs() - launchTimestamp) / 1000)
+        : null;
+
+      // Calculate market cap from bonding curve data
+      // Market cap = price * total supply
+      // Price = virtualSolReserves / virtualTokenReserves (in SOL per token)
+      // Market cap = price * supply in lamports
+      let marketCapUsd: number | null = null;
+      if (bondingCurveAccount?.data && bondingCurveAccount.data.length >= 49 && supply?.value) {
+        const parsed = parseBondingCurveData(bondingCurveAccount.data);
+        if (parsed && parsed.virtualTokenReserves > 0n) {
+          try {
+            const pricePerTokenLamports = parsed.virtualSolReserves * 10n ** 9n / parsed.virtualTokenReserves;
+            const totalSupplyRaw = BigInt(supply.value.amount);
+            const marketCapLamports = pricePerTokenLamports * totalSupplyRaw;
+            const solPriceUsd = await container.solPriceOracle.getSolPriceUsd();
+            marketCapUsd = Number(marketCapLamports) / 1e9 * solPriceUsd;
+          } catch (err: unknown) {
+            logger.warn('Failed to calculate market cap', {
+              mint: mint.slice(0, 12),
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+      }
+
       logger.info('Entry check data fetched', {
         mint: mint.slice(0, 12),
         signalType: signal.type,
@@ -190,6 +220,8 @@ export function createDataProvider(
         walletConcentrationAcceptable,
         creatorNotBlacklisted,
         priceImpactBps,
+        secondsSinceLaunch,
+        marketCapUsd,
       });
 
       return {
@@ -207,6 +239,8 @@ export function createDataProvider(
         volumeLamports,
         windowMs,
         priceImpactBps,
+        secondsSinceLaunch: secondsSinceLaunch ?? undefined,
+        marketCapUsd,
       };
     },
 

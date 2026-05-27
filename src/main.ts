@@ -131,7 +131,12 @@ async function main(): Promise<void> {
       id: generateId('sig'), type: 'LAUNCH' as const, mint: s.mint,
       timestamp: nowMs(), slot: s.slot ?? 0, creator: s.creator ?? '', signature: s.signature ?? '',
     }).catch(() => {});
-    void strategy.onSignal(signal);
+    strategy.onSignal(signal).catch((err: unknown) => {
+      logger.error('Launch signal processing failed', {
+        mint: signal.mint,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
   });
 
   momentumDetector.onSignal((signal) => {
@@ -142,7 +147,12 @@ async function main(): Promise<void> {
       timestamp: nowMs(), slot: s.slot ?? 0, buyCount: s.buyCount ?? 0,
       windowSeconds: s.windowSeconds ?? MOMENTUM_WINDOW_SECONDS, volumeSol: s.volumeSol ?? 0n,
     }).catch(() => {});
-    void strategy.onSignal(signal);
+    strategy.onSignal(signal).catch((err: unknown) => {
+      logger.error('Momentum signal processing failed', {
+        mint: signal.mint,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
   });
 
   migrationDetector.onSignal((signal) => {
@@ -165,10 +175,12 @@ async function main(): Promise<void> {
   });
 
   dispatcher.on('trade', (event) => {
+    const isBuy = (event.data['isBuy'] as boolean) ?? true;
     momentumDetector.handleTrade({
-      mint: event.mint ?? '', isBuy: (event.data['isBuy'] as boolean) ?? true,
+      mint: event.mint ?? '', isBuy,
       solAmount: typeof event.data['solAmount'] === 'bigint' ? event.data['solAmount'] as bigint : BigInt((event.data['solAmount'] as string) ?? '0'),
       slot: event.slot ?? 0, timestamp: event.receivedAt,
+      wallet: (event.data[isBuy ? 'buyer' : 'seller'] as string) ?? undefined,
     });
   });
 

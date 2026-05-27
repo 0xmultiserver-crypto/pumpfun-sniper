@@ -8,7 +8,7 @@ import type { MintAddress } from './token.js';
 import type { WalletAddress } from './wallet.js';
 
 /** Signal type discriminator */
-export type SignalType = 'LAUNCH' | 'MOMENTUM' | 'MIGRATION' | 'LIQUIDITY_PHASE';
+export type SignalType = 'LAUNCH' | 'MOMENTUM' | 'MIGRATION' | 'LIQUIDITY_PHASE' | 'WASH_TRADE';
 
 /** Unique signal identifier */
 export type SignalId = string;
@@ -51,6 +51,13 @@ export interface LiquidityPhaseSignal extends BaseSignal {
   readonly phase: 'BONDING' | 'GRADUATED';
 }
 
+/** Wash trade pattern detected */
+export interface WashTradeSignal extends BaseSignal {
+  readonly type: 'WASH_TRADE';
+  readonly washScore: number;
+  readonly washReasons: readonly string[];
+}
+
 /** Parsed token launch event (protocol-agnostic). Used by detectors. */
 export interface LaunchEvent {
   readonly mint: MintAddress;
@@ -64,4 +71,4 @@ export interface LaunchEvent {
 }
 
 /** Union of all signal types */
-export type Signal = LaunchSignal | MomentumSignal | MigrationSignal | LiquidityPhaseSignal;
+export type Signal = LaunchSignal | MomentumSignal | MigrationSignal | LiquidityPhaseSignal | WashTradeSignal;

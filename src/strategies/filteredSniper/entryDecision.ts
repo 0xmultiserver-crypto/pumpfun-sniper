@@ -81,6 +81,9 @@ export interface EntryCheckData {
 
   /** Optional: seconds since token launch for dynamic position sizing. */
   readonly secondsSinceLaunch?: number;
+
+  /** Optional: market cap in USD for tier-based position sizing. */
+  readonly marketCapUsd?: number | null;
 }
 
 /** Individual check result. */

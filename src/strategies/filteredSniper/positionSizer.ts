@@ -8,7 +8,8 @@
  *   1. Volume multiplier: more volume → bigger position (capped at 1.5x)
  *   2. Creator multiplier: higher creator score → bigger position
  *   3. Launch timing multiplier: earlier → bigger position
- *   4. Final = base * volumeMult * creatorMult * timingMult, clamped to [min, max]
+ *   4. Market cap tier multiplier: bigger market cap → bigger position
+ *   5. Final = base * volumeMult * creatorMult * timingMult * mcapMult, clamped to [min, max]
  *
  * Falls back to BASE_POSITION_SIZE_USD if any required data is unavailable.
  */
@@ -32,6 +33,42 @@ export interface PositionSizerParams {
   readonly creatorScore: number | null;
   /** Seconds elapsed since the token was launched. */
   readonly secondsSinceLaunch: number;
+  /** Market cap in USD (null if unavailable). */
+  readonly marketCapUsd?: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// Market Cap Tiers (from ponyin.id)
+// ---------------------------------------------------------------------------
+
+export type MarketCapTier = 'MICRO' | 'SMALL' | 'MID' | 'LARGE';
+
+/**
+ * Determine market cap tier.
+ * - MICRO: <$100K (high risk, snipe only)
+ * - SMALL: $100K-$1M (momentum play)
+ * - MID: $1M-$10M (swing trade)
+ * - LARGE: >$10M (established, CEX play)
+ */
+export function getMarketCapTier(marketCapUsd: number | null | undefined): MarketCapTier {
+  if (marketCapUsd === null || marketCapUsd === undefined) return 'MICRO'; // default to conservative
+  if (marketCapUsd < 100_000) return 'MICRO';
+  if (marketCapUsd < 1_000_000) return 'SMALL';
+  if (marketCapUsd < 10_000_000) return 'MID';
+  return 'LARGE';
+}
+
+/**
+ * Market cap tier multiplier for position sizing.
+ * Bigger market cap = more liquidity = can handle bigger positions.
+ */
+function marketCapMultiplier(tier: MarketCapTier): number {
+  switch (tier) {
+    case 'MICRO': return 0.5;   // High risk, small position
+    case 'SMALL': return 1.0;   // Standard position
+    case 'MID':   return 1.3;   // Larger position (more liquidity)
+    case 'LARGE': return 1.5;   // Largest position (most liquidity)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -79,9 +116,18 @@ export class DynamicPositionSizer {
     );
     const crMult = creatorMultiplier(params.creatorScore);
     const timeMult = timingMultiplier(params.secondsSinceLaunch);
+    const mcapTier = getMarketCapTier(params.marketCapUsd);
+    const mcapMult = marketCapMultiplier(mcapTier);
 
-    const raw = BASE_POSITION_SIZE_USD * volMult * crMult * timeMult;
+    const raw = BASE_POSITION_SIZE_USD * volMult * crMult * timeMult * mcapMult;
 
     return Math.max(MIN_POSITION_SIZE_USD, Math.min(MAX_POSITION_SIZE_USD, raw));
+  }
+
+  /**
+   * Get market cap tier for logging/display.
+   */
+  getTier(marketCapUsd: number | null | undefined): MarketCapTier {
+    return getMarketCapTier(marketCapUsd);
   }
 }

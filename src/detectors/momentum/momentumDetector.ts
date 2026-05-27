@@ -34,6 +34,8 @@ export interface TradeEvent {
   readonly solAmount: bigint;
   readonly slot: number;
   readonly timestamp: number;
+  /** Buyer/seller wallet address for bundle detection. */
+  readonly wallet?: string;
 }
 
 /** Configuration for the momentum detector. */
@@ -66,9 +68,11 @@ const DEFAULT_MAX_TRACKED_TOKENS = DEFAULT_MOMENTUM_MAX_TRACKED_TOKENS;
 
 interface TokenMomentumState {
   /** Circular buffer of recent buy timestamps and amounts. */
-  buys: Array<{ timestamp: number; solAmount: bigint; slot: number }>;
+  buys: Array<{ timestamp: number; solAmount: bigint; slot: number; wallet?: string }>;
   /** Unique slots with buys in the current window. */
   uniqueSlots: Set<number>;
+  /** Unique wallets with buys in the current window. */
+  uniqueWallets: Set<string>;
   /** Last time a momentum signal was emitted for this token. */
   lastSignalAt: number;
 }
@@ -163,13 +167,14 @@ export class MomentumDetector implements IDetector {
 
     let state = this.tokenStates.get(event.mint);
     if (state === undefined) {
-      state = { buys: [], uniqueSlots: new Set(), lastSignalAt: 0 };
+      state = { buys: [], uniqueSlots: new Set(), uniqueWallets: new Set(), lastSignalAt: 0 };
       this.tokenStates.set(event.mint, state);
     }
 
     // Add buy
-    state.buys.push({ timestamp: event.timestamp, solAmount: event.solAmount, slot: event.slot });
+    state.buys.push({ timestamp: event.timestamp, solAmount: event.solAmount, slot: event.slot, wallet: event.wallet });
     state.uniqueSlots.add(event.slot);
+    if (event.wallet) state.uniqueWallets.add(event.wallet);
 
     // Trim expired buys
     const cutoff = nowMs() - this.windowMs;
@@ -183,6 +188,12 @@ export class MomentumDetector implements IDetector {
       }
     }
 
+    // Rebuild uniqueWallets from remaining buys
+    state.uniqueWallets.clear();
+    for (const buy of state.buys) {
+      if (buy.wallet) state.uniqueWallets.add(buy.wallet);
+    }
+
     // Check thresholds
     if (state.buys.length >= this.minBuyCount) {
       let totalVolume = 0n;
@@ -191,17 +202,25 @@ export class MomentumDetector implements IDetector {
       }
 
       if (totalVolume >= this.minVolumeLamports) {
-        // Bundle detection: many buys from very few slots = suspicious
+        // Bundle detection: many buys from very few wallets/slots = suspicious
         const uniqueSlotCount = state.uniqueSlots.size;
+        const uniqueWalletCount = state.uniqueWallets.size;
         const buyCount = state.buys.length;
-        const bundleRatio = buyCount / Math.max(uniqueSlotCount, 1);
 
-        if (bundleRatio >= 3 && uniqueSlotCount <= 2) {
+        // Use wallet-based detection when wallet data is available,
+        // otherwise fall back to slot-based detection
+        const hasWalletData = uniqueWalletCount > 0;
+        const uniqueEntityCount = hasWalletData ? uniqueWalletCount : uniqueSlotCount;
+        const bundleRatio = buyCount / Math.max(uniqueEntityCount, 1);
+
+        if (bundleRatio >= 3 && uniqueEntityCount <= 2) {
           logger.warn('BUNDLE DETECTED — skipping momentum signal', {
             mint: event.mint.slice(0, 12),
             buyCount,
+            uniqueWallets: uniqueWalletCount,
             uniqueSlots: uniqueSlotCount,
             bundleRatio: bundleRatio.toFixed(1),
+            method: hasWalletData ? 'wallet' : 'slot',
           });
           return;
         }
@@ -210,7 +229,7 @@ export class MomentumDetector implements IDetector {
         const now = nowMs();
         if (now - state.lastSignalAt >= this.cooldownMs) {
           state.lastSignalAt = now;
-          this.emitMomentumSignal(event.mint, buyCount, totalVolume, event.slot, uniqueSlotCount);
+          this.emitMomentumSignal(event.mint, buyCount, totalVolume, event.slot, uniqueSlotCount, uniqueWalletCount);
         }
       }
     }
@@ -226,6 +245,7 @@ export class MomentumDetector implements IDetector {
     volumeSol: bigint,
     slot: number,
     uniqueSlotCount: number,
+    uniqueWalletCount: number,
   ): void {
     this.signalCounter += 1;
     const signalId = `momentum-${slot}-${this.signalCounter}`;
@@ -248,6 +268,7 @@ export class MomentumDetector implements IDetector {
       buyCount,
       volumeSol: volumeSol.toString(),
       windowSeconds: this.windowSeconds,
+      uniqueWallets: uniqueWalletCount,
     });
 
     this.emit(signal);

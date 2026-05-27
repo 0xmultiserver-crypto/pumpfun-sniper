@@ -206,9 +206,11 @@ export class FilteredSniperStrategy implements IStrategy {
   async onSignal(signal: Signal): Promise<EntryDecisionResult | null> {
     const mint = signal.mint;
 
+    logger.info('onSignal called', { mint, signalType: signal.type, state: this.state });
+
     // Guard: strategy must be running
     if (this.state !== 'RUNNING') {
-      logger.debug('Signal ignored: strategy not running', { mint, signalType: signal.type });
+      logger.info('Signal ignored: strategy not running', { mint, signalType: signal.type, state: this.state });
       return null;
     }
 
@@ -258,10 +260,14 @@ export class FilteredSniperStrategy implements IStrategy {
         momentumMinVolumeLamports: MOMENTUM_MIN_VOLUME_LAMPORTS,
         creatorScore: checkData.creatorScore ?? null,
         secondsSinceLaunch: checkData.secondsSinceLaunch ?? 0,
+        marketCapUsd: checkData.marketCapUsd ?? null,
       });
+      const mcapTier = this.positionSizer.getTier(checkData.marketCapUsd ?? null);
       logger.info('Dynamic position size calculated', {
         mint,
         positionSizeUsd,
+        marketCapTier: mcapTier,
+        marketCapUsd: checkData.marketCapUsd,
       });
     }
 
