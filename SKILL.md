@@ -1,6 +1,6 @@
 # Pumpfun Sniper Bot
 
-Solana bonding curve sniper bot for pump.fun. Detects momentum signals, filters through 9 entry checks, executes buys, and manages exits via TP/SL/trailing stop.
+Solana bonding curve sniper bot for pump.fun. Detects momentum signals, filters through 18 entry checks, executes buys, and manages exits via TP/SL/trailing stop/scale-out.
 
 Repo: https://github.com/0xmultiserver-crypto/pumpfun.git
 
@@ -28,7 +28,9 @@ src/
     dataProvider.ts          — RPC/data fetching, calls evaluators
     entryCheckEvaluator.ts   — Pure evaluation: authority, liquidity, launch, metadata, concentration
     executionDelegate.ts     — Thin facade wiring StrategyExecutionDelegate
-    solPriceOracle.ts        — CoinGecko → $150 fallback
+    solPriceOracle.ts        — CoinGecko → $85 fallback (2026-05-29)
+    heliusHolderCount.ts     — Real holder count via Helius API
+    realVolumeFetcher.ts     — Real 1h volume via DexScreener
     wsManager.ts             — WebSocket with auto-reconnect
     positionRecovery.ts      — Startup recovery from DB
     execution/
@@ -39,14 +41,15 @@ src/
       tradeRecorder.ts       — DB trade persistence
       pnlRecorder.ts         — P&L recording + cooldown
       onChainAccounting.ts   — Confirmed tx metadata accounting
+      rentReclaimer.ts       — Rent reclamation on close
   core/
     state/positionRegistry.ts — Active positions tracker
-    constants/defaults.ts    — ALL shared constants (LOCKED values)
+    constants/defaults/      — ALL shared constants (LOCKED values)
     constants/programs.ts    — Solana program IDs
     types/                   — Pure data shapes
   strategies/filteredSniper/ — Business logic
-    entryDecision.ts         — 9-check entry filter
-    exitDecision.ts          — TP/SL/trailing/timeout/graduated
+    entryDecision.ts         — 18-check entry filter
+    exitDecision.ts          — TP/SL/trailing/timeout/graduated/scale-out
     filteredSniperRules.ts   — Strategy rules (derives from defaults.ts)
   risk/controls/             — Risk guards (kill switch, daily loss, cooldown, throttle)
   execution/venues/          — PumpfunVenue + JupiterVenue
@@ -61,53 +64,66 @@ src/
 ## Pipeline Flow
 
 ```
-WS Event → Momentum Detector → Bundle Detection → Entry Check (9 filters)
+WS Event → Momentum Detector → Bundle Detection → Entry Check (18 filters)
   → Risk Guards (5 checks) → BUY TX → On-Chain Confirm → Exit Monitor (2s poll)
-  → TP/SL/Trailing/Timeout/Graduated → SELL TX → On-Chain Confirm → Cooldown
+  → TP/SL/Trailing/Timeout/Graduated/Scale-Out → SELL TX → On-Chain Confirm → Cooldown
 ```
 
-### 9 Entry Checks
-1. Signal type = MOMENTUM
-2. Launch detected
-3. Creator launch count
-4. Mint authority revoked
-5. Freeze authority revoked
-6. Metadata sane (Token-2022 supported)
-7. Liquidity sane
-8. Wallet concentration < 80% top 5
-9. Momentum: 7+ buys, 15s window, 1+ SOL volume
+### 18 Entry Checks
+1. Launch detected
+2. Creator not blacklisted
+3. Creator history acceptable (including creator score ≥ 45)
+4. Mint authority safe (revoked)
+5. Freeze authority safe (revoked)
+6. Metadata sane
+7. Liquidity sane (minimum reserves on bonding curve)
+8. Wallet concentration acceptable (< 60% top 5)
+9. Momentum threshold met (10+ buys, 10s window, 2+ SOL volume)
+10. Price impact acceptable (≤ 500 bps)
+11. Bundle percentage acceptable (≤ 30%)
+12. Wash trade score acceptable (≤ 60)
+13. Unique wallets sufficient (≥ 12)
+14. Sell pressure acceptable (≤ 60% sells in window)
+15. Liquidity depth sufficient (≥ 0.5 SOL real reserves)
+16. Holder-to-bundle ratio acceptable
+17. Holder-MCap ratio (≤ 0.015 holders/$ — catches coordinated inflation)
+18. Volume-MCap ratio (≤ 5x — catches wash trade volume)
 
 ### 5 Risk Guards (checked in order)
 1. EmergencyKillSwitch — global on/off
 2. DailyLossGuard — $40/day loss limit
-3. CooldownManager — 5 min cooldown after exit
+3. CooldownManager — 2 min cooldown after exit
 4. TradeThrottle — 3 trades/60s, 5s min gap
 5. MaxExposureGuard — 2 concurrent positions max
 
 ### Exit Priority Order
 1. GRADUATED (bonding curve complete → route to Jupiter)
 2. KILL_SWITCH (emergency)
-3. TRAILING_STOP (10% from highest, activates at +30%)
-4. STOP_LOSS (-50% from entry)
-5. TAKE_PROFIT (+500% from entry)
-6. TIMEOUT (1 hour)
+3. SCALE_OUT (partial exits at +100% sell 50%, +500% sell 25%)
+4. TRAILING_STOP (50% from highest, activates at +100%)
+5. STOP_LOSS (-80% from entry)
+6. TAKE_PROFIT (+1500% from entry)
+7. TIMEOUT (6 hours)
 
 ## Current Locked Parameters
 
 | Parameter | Value | File |
 |---|---|---|
-| Take Profit | +500% | `defaults.ts` |
-| Stop Loss | -50% | `defaults.ts` |
-| Trailing activation | +30% | `defaults.ts` |
-| Trailing distance | 10% | `defaults.ts` |
-| Position size | $1 USD | `.env` |
-| Cooldown | 5 min | `defaults.ts` |
-| Max concurrent | 2 | `defaults.ts` |
-| Priority fee | 150k micro-lamports/CU | `defaults.ts` |
-| Slippage | 500 bps (5%) | `defaults.ts` |
-| Momentum min buys | 7 | `defaults.ts` |
-| Momentum window | 15s | `defaults.ts` |
-| Momentum min volume | 1 SOL | `defaults.ts` |
+| Take Profit | +1500% | `defaults/trading.ts` |
+| Stop Loss | -80% | `defaults/trading.ts` |
+| Trailing activation | +100% | `defaults/trading.ts` |
+| Trailing distance | 50% | `defaults/trading.ts` |
+| Position size | $1.20 USD (dynamic: $0.10–$5.00) | `defaults/trading.ts` |
+| Cooldown | 2 min (120s) | `defaults/risk.ts` |
+| Max concurrent | 2 | `defaults/trading.ts` |
+| Priority fee | 200k micro-lamports/CU | `defaults/infrastructure.ts` |
+| Slippage | 500 bps (5%) | `defaults/trading.ts` |
+| Momentum min buys | 10 | `defaults/detection.ts` |
+| Momentum window | 10s | `defaults/detection.ts` |
+| Momentum min volume | 2 SOL | `defaults/detection.ts` |
+| Max wallet concentration | 60% top 5 | `defaults/detection.ts` |
+| Daily kill limit | $40/day | `defaults/risk.ts` |
+| Scale-out enabled | true | `defaults/trading.ts` |
 
 ## VPS Deployment
 
@@ -179,10 +195,10 @@ npm run build       # Must pass before deploy
 ## Key Pitfalls
 
 ### Priority Fee (Critical)
-`computeUnitPrice: 50_000n` causes TX to expire (block height exceeded). Must use `150_000n`. Even VPS fails at 50k.
+`computeUnitPrice: 50_000n` causes TX to expire (block height exceeded). Must use `200_000n`. Even VPS fails at 50k.
 
 ### Trailing Stop Exit-Below-Activation
-When price barely crosses +30% activation and immediately drops, exit PnL can be BELOW +30%. Example: peak=+32%, drop 10% from peak → exit at +17%. This is correct — trailing locks whatever profit exists after peak.
+When price barely crosses +100% activation and immediately drops, exit PnL can be BELOW +100%. Example: peak=+102%, drop 50% from peak → exit at +1%. This is correct — trailing locks whatever profit exists after peak.
 
 ### Token-2022 Metadata
 New pump.fun mints use Token-2022. Metadata is in mint extension, not Metaplex PDA. `evaluateMetadata()` handles both paths.
@@ -197,13 +213,16 @@ When bonding curve completes during trade, reserves drain → price=0 → false 
 Exit monitor polls every 2s but only logs when TP/SL/trailing/timeout triggers. Silence = holding, not broken.
 
 ### Constants Propagation
-`defaults.ts` is source of truth but some files have local copies. After changing constants, always grep for old values.
+`defaults/` is source of truth but some files have local copies. After changing constants, always grep for old values.
 
 ### Custom 6002 Retry
 First BUY attempt may fail with Custom 6002 (fee drift). Bot auto-retries with fresh blockhash + new quote. Don't panic.
 
 ### Cooldown After Any Exit
-Cooldown triggers after STOP_LOSS, TRAILING_STOP, TIMEOUT (not just SL). 5 min cooldown blocks subsequent buys.
+Cooldown triggers after STOP_LOSS, TRAILING_STOP, TIMEOUT (not just SL). 2 min cooldown blocks subsequent buys.
+
+### Scale-Out Partial Exits
+Bot sells partial positions at profit tiers (+100% → sell 50%, +500% → sell 25%). Remaining position rides with trailing stop. Scale-out does NOT trigger cooldown.
 
 ## Environment
 

@@ -15,6 +15,8 @@ src/
 │   ├── wsManager.ts                     # WebSocket with auto-reconnect
 │   ├── positionRecovery.ts              # Startup DB recovery + live balance check
 │   ├── positionReconciler.ts            # Periodic DB ↔ wallet position sync
+│   ├── heliusHolderCount.ts             # Real holder count via Helius API (rate limited, cached)
+│   ├── realVolumeFetcher.ts             # Real 1h volume via DexScreener (rate limited, cached)
 │   └── execution/
 │       ├── buyExecutor.ts               # BUY orchestration (quote → TX → confirm)
 │       ├── sellExecutor.ts              # SELL orchestration (Pumpfun/Jupiter)
@@ -68,7 +70,7 @@ src/
 │   └── filteredSniper/
 │       ├── filteredSniperStrategy.ts    # Main strategy class (entry + exit)
 │       ├── filteredSniperRules.ts       # Re-exports from defaults.ts
-│       ├── entryDecision.ts             # 13 entry checks evaluation
+│       ├── entryDecision.ts             # 18 entry checks evaluation
 │       ├── exitDecision.ts              # TP/SL/timeout evaluation
 │       ├── positionSizer.ts             # Dynamic position sizing by market cap
 │       ├── candleAnalyzer.ts            # Candle data tracking
@@ -244,7 +246,7 @@ WebSocket → wsMessageHandler → eventDecoder/launchParser
     → strategy.onSignal()
       → dataProvider.getEntryCheckData() [RPC fetch]
       → entryCheckEvaluator [boolean evaluation]
-      → evaluateEntry() [13 checks]
+      → evaluateEntry() [18 checks]
         → ALL PASS → riskGuardRunner → buyExecutor → TX → chain
         → ANY FAIL → reject (log reason)
 
@@ -257,7 +259,7 @@ Exit monitoring (1s poll):
 ## Key Files
 
 - **Config source of truth**: `core/constants/defaults.ts` → `defaults/*.ts`
-- **Entry rules**: `strategies/filteredSniper/entryDecision.ts` (13 checks)
+- **Entry rules**: `strategies/filteredSniper/entryDecision.ts` (18 checks)
 - **Exit rules**: `strategies/filteredSniper/exitDecision.ts`
 - **Entry check evaluation**: `app/entryCheckEvaluator.ts`
 - **Data fetching**: `app/dataProvider.ts`
