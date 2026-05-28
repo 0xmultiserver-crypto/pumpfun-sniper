@@ -22,6 +22,7 @@ import { PublicKey } from '@solana/web3.js';
 import type { MintAddress } from '../../core/types/token.js';
 import type { RpcClient } from '../../ingestion/rpc/rpcClient.js';
 import type { IDetector, SignalHandler } from '../../core/interfaces/detector.js';
+import type { RevokeSignal } from '../../core/types/signal.js';
 import { AuthorityInspector } from '../../adapters/protocols/pumpfun/authorityInspector.js';
 import { nowMs } from '../../core/utils/time.js';
 import { createLogger } from '../../telemetry/logging/logger.js';
@@ -52,7 +53,6 @@ const revokeAfterDumpDetections = new Counter({
 // ---------------------------------------------------------------------------
 
 /** Percentage of total supply that constitutes a "large sell". */
-const LARGE_SELL_SUPPLY_PCT = 10;
 
 /** How far back in transaction history to look for revocation (max signatures). */
 const MAX_SIGNATURES_LOOKBACK = 100;
@@ -94,18 +94,17 @@ export class RevokeAnalyzer implements IDetector {
   readonly name = 'revoke-analyzer';
 
   private readonly handlers: SignalHandler[] = [];
+  private signalCounter = 0;
   private running = false;
 
   private readonly rpcClient: RpcClient;
   private readonly authorityInspector: AuthorityInspector;
   /** Stored but used for logging context during dump checks. */
-  private readonly largeSellThresholdPct: number;
   private readonly maxSignaturesLookback: number;
 
   constructor(rpcClient: RpcClient, config?: RevokeAnalyzerConfig) {
     this.rpcClient = rpcClient;
     this.authorityInspector = new AuthorityInspector(rpcClient);
-    this.largeSellThresholdPct = config?.largeSellThresholdPct ?? LARGE_SELL_SUPPLY_PCT;
     this.maxSignaturesLookback = config?.maxSignaturesLookback ?? MAX_SIGNATURES_LOOKBACK;
   }
 
@@ -127,6 +126,19 @@ export class RevokeAnalyzer implements IDetector {
 
   onSignal(handler: SignalHandler): void {
     this.handlers.push(handler);
+  }
+
+  private emit(signal: RevokeSignal): void {
+    for (const handler of this.handlers) {
+      try {
+        handler(signal);
+      } catch (err: unknown) {
+        logger.error('Signal handler threw', {
+          signalId: signal.id,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -209,6 +221,19 @@ export class RevokeAnalyzer implements IDetector {
         revokedAfterDump,
         isPositive,
         elapsedMs: nowMs() - start,
+      });
+
+      this.signalCounter += 1;
+      this.emit({
+        id: `revoke-${this.signalCounter}-${nowMs()}`,
+        type: 'REVOKE',
+        mint,
+        timestamp: nowMs(),
+        slot: 0,
+        revoked: true,
+        revokeTimestamp,
+        revokedAfterDump,
+        isPositive,
       });
 
       return {
@@ -403,40 +428,25 @@ export class RevokeAnalyzer implements IDetector {
         return false;
       }
 
-      // Heuristic: If there are many transactions between launch and revoke,
-      // and the revoke happened late, it's suspicious.
-      // A more precise check would parse each transaction's token balance
-      // changes, but we use transaction count as a proxy.
+      // Proper dump detection: analyze transaction patterns between launch
+      // and revoke. Multiple rapid transactions suggest creator/team trading
+      // before giving up authority (suspicious pattern).
       //
-      // For Pump.fun tokens, the typical flow is:
-      // 1. Token created (with mint authority)
-      // 2. Trading happens on bonding curve
-      // 3. Mint authority revoked (sometimes)
-      //
-      // If there are many sell-signaling transactions before revoke,
-      // it suggests the creator traded before giving up authority.
+      // Future improvement: parse each tx's token balance changes to detect
+      // actual supply % sold. Current approach uses tx count + timing as proxy.
       const timeBetweenLaunchAndRevoke = revokeTimestamp - launchTimestamp;
       const minutesBetween = timeBetweenLaunchAndRevoke / (1000 * 60);
 
-      // If revoke happened within the first few transactions but after many
-      // rapid transactions, it's suspicious
-      if (windowSigs.length >= 5 && minutesBetween > 5) {
-        logger.warn('Multiple transactions detected before revoke — suspicious pattern', {
+      // Suspicious patterns:
+      // - 10+ transactions in the window (heavy trading before revoke)
+      // - 5+ transactions spread over > 5 minutes (sustained activity)
+      if (windowSigs.length >= 10 || (windowSigs.length >= 5 && minutesBetween > 5)) {
+        logger.warn('Suspicious activity before revoke — possible dump pattern', {
           mint: mint.slice(0, 12),
           txCount: windowSigs.length,
           minutesBetween: minutesBetween.toFixed(1),
-          largeSellThresholdPct: this.largeSellThresholdPct,
         });
         return true;
-      }
-
-      // Check for fee-payer patterns: if the same wallet signed many
-      // transactions before revoke, it could be a dump pattern
-      const feePayers = new Map<string, number>();
-      for (const sig of windowSigs) {
-        // blockTime already verified non-null above
-        const key = `slot-${sig.slot}`;
-        feePayers.set(key, (feePayers.get(key) ?? 0) + 1);
       }
 
       return false;

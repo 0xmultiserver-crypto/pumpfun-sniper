@@ -86,9 +86,15 @@ function passingEntryData(overrides: Partial<EntryCheckData> = {}): EntryCheckDa
     liquiditySane: true,
     walletConcentrationAcceptable: true,
     buyCountInWindow: MOMENTUM_MIN_BUYS,
-    volumeLamports: 1_000_000_000n,
+    volumeLamports: MOMENTUM_MIN_VOLUME_LAMPORTS,
     windowMs: MOMENTUM_WINDOW_MS,
     priceImpactBps: null,
+    bundlePct: 10,
+    washTradeScore: 20,
+    uniqueWallets: 15,
+    sellCountInWindow: 3,
+    realSolReservesLamports: 1_000_000_000n,
+    holderCount: 50,
     ...overrides,
   };
 }
@@ -107,6 +113,10 @@ class RecordingProvider implements StrategyDataProvider {
 
   getActivePositionCount(): number {
     return 0;
+  }
+
+  isTokenBlacklisted(_mint: string): boolean {
+    return false;
   }
 }
 

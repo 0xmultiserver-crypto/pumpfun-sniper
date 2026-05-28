@@ -18,16 +18,16 @@ describe('MaxExposureGuard', () => {
 
     expect(result.allowed).toBe(true);
     expect(result.currentPositions).toBe(0);
-    expect(result.maxPositions).toBe(1); // LOCKED
+    expect(result.maxPositions).toBe(2); // DEFAULT_MAX_CONCURRENT_POSITIONS
     expect(result.reason).toBeNull();
   });
 
-  it('blocks when max positions reached (LOCKED: 1)', async () => {
-    const guard = new MaxExposureGuard(mockProvider(1));
+  it('blocks when max positions reached', async () => {
+    const guard = new MaxExposureGuard(mockProvider(2));
     const result = await guard.canOpenPosition();
 
     expect(result.allowed).toBe(false);
-    expect(result.currentPositions).toBe(1);
+    expect(result.currentPositions).toBe(2);
     expect(result.reason).toContain('Max concurrent positions reached');
   });
 
@@ -52,7 +52,7 @@ describe('MaxExposureGuard', () => {
   it('returns correct maxPositions value', async () => {
     const guard = new MaxExposureGuard(mockProvider(0));
     const result = await guard.canOpenPosition();
-    expect(result.maxPositions).toBe(1);
+    expect(result.maxPositions).toBe(2);
   });
 
   it('getExposure() returns current state', async () => {

@@ -78,7 +78,7 @@ export interface JitoSendResult {
 /**
  * Pick a random Jito tip account.
  */
-export function pickJitoTipAccount(): string {
+function pickJitoTipAccount(): string {
   const index = Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length);
   return JITO_TIP_ACCOUNTS[index]!;
 }
@@ -92,7 +92,7 @@ export function pickJitoTipAccount(): string {
  * @param payer        Public key of the tip payer (must be a signer in the tx).
  * @param tipLamports  Amount of lamports to tip (default: JITO_TIP_LAMPORTS).
  */
-export function buildJitoTipIx(
+function buildJitoTipIx(
   payer: PublicKey,
   tipLamports: number = JITO_TIP_LAMPORTS,
 ): TransactionInstruction {

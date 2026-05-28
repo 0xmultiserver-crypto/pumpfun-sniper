@@ -51,7 +51,7 @@ export function createPool(opts: PostgresPoolOptions): Pool {
 /**
  * Return the live pool (throws if createPool was never called).
  */
-export function getPool(): Pool {
+function getPool(): Pool {
   if (!pool) {
     throw new Error('[postgres] Pool not initialised — call createPool() first');
   }

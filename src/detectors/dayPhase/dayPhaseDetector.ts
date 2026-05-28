@@ -15,6 +15,7 @@
 
 import type { MintAddress } from '../../core/types/token.js';
 import type { IDetector, SignalHandler } from '../../core/interfaces/detector.js';
+import type { DayPhaseSignal } from '../../core/types/signal.js';
 import { nowMs } from '../../core/utils/time.js';
 import { createLogger } from '../../telemetry/logging/logger.js';
 import { Counter } from 'prom-client';
@@ -102,6 +103,7 @@ export class DayPhaseDetector implements IDetector {
   readonly name = 'day-phase-detector';
 
   private readonly handlers: SignalHandler[] = [];
+  private signalCounter = 0;
 
   private readonly minFdvUsd: number;
   private readonly minAthDipPct: number;
@@ -133,6 +135,19 @@ export class DayPhaseDetector implements IDetector {
 
   onSignal(handler: SignalHandler): void {
     this.handlers.push(handler);
+  }
+
+  private emit(signal: DayPhaseSignal): void {
+    for (const handler of this.handlers) {
+      try {
+        handler(signal);
+      } catch (err: unknown) {
+        logger.error('Signal handler threw', {
+          signalId: signal.id,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -213,6 +228,19 @@ export class DayPhaseDetector implements IDetector {
     reasons.push('All day-phase criteria met');
     dayPhaseDetectionsTotal.inc();
 
+    this.signalCounter += 1;
+    this.emit({
+      id: `dayphase-${this.signalCounter}-${nowMs()}`,
+      type: 'DAY_PHASE',
+      mint,
+      timestamp: nowMs(),
+      slot: 0,
+      fdv: tokenData.fdvUsd,
+      athDipPct,
+      sidewaysDays,
+      holderTrend,
+    });
+
     logger.info('Day-phase cooldown detected', {
       mint: mint.slice(0, 12),
       fdv: tokenData.fdvUsd,
@@ -240,15 +268,9 @@ export class DayPhaseDetector implements IDetector {
       return this.calculateSidewaysFromHistory(tokenData.priceHistory, tokenData.currentPriceUsd);
     }
 
-    // Fallback: estimate sideways days as time since ATH dip
-    // (assumes the dump happened at ATH and sideways started after)
-    const msSinceAth = nowMs() - tokenData.athTimestamp;
-    const daysSinceAth = msSinceAth / (1000 * 60 * 60 * 24);
-
-    // We need to subtract an estimated dump duration (1-2 days)
-    // Conservative: assume dump took 1 day
-    const estimatedDumpDays = 1;
-    return Math.max(0, daysSinceAth - estimatedDumpDays);
+    // Fallback: without price history, we cannot determine sideways movement.
+    // Return 0 to avoid false positives — the detector requires actual data.
+    return 0;
   }
 
   /**
@@ -280,9 +302,7 @@ export class DayPhaseDetector implements IDetector {
 
       // Mark day as in-band if at least one data point is in band
       const existing = dayBuckets.get(dayKey);
-      if (existing === undefined || existing === true) {
-        dayBuckets.set(dayKey, inBand);
-      }
+      dayBuckets.set(dayKey, (existing ?? false) || inBand);
     }
 
     totalDays = dayBuckets.size;

@@ -1,0 +1,119 @@
+/**
+ * Position Reconciler
+ *
+ * Periodically checks if DB OPEN positions still have live token balance.
+ * If wallet has 0 tokens but DB says OPEN → record SELL to close the gap.
+ * Fixes: manual sells, bot crashes during sell, sell TX confirmed but DB not updated.
+ */
+
+import { PublicKey, type Connection } from '@solana/web3.js';
+import type { PositionRegistry } from '../core/state/positionRegistry.js';
+import { createLogger } from '../telemetry/logging/logger.js';
+import { nowMs } from '../core/utils/time.js';
+import type { OpenBuyTradeRepository } from './positionRecovery.js';
+import { hasLiveTokenBalance } from './positionRecovery.js';
+import { saveTrade } from './execution/tradeRecorder.js';
+import type { ServiceContainer } from './container.js';
+
+const logger = createLogger('app:reconciler');
+
+const RECONCILE_INTERVAL_MS = 60_000; // Check every 60 seconds
+
+export interface ReconcilerConfig {
+  readonly container: ServiceContainer;
+  readonly connection: Connection;
+  readonly wallet: PublicKey;
+  readonly positionRegistry: PositionRegistry;
+  readonly tradeRepository: OpenBuyTradeRepository;
+  readonly monitorTrade: (tradeId: string, mint?: string) => void;
+  readonly monitoredTrades: Set<string>;
+}
+
+export class PositionReconciler {
+  private readonly config: ReconcilerConfig;
+  private intervalHandle: ReturnType<typeof setInterval> | null = null;
+
+  constructor(config: ReconcilerConfig) {
+    this.config = config;
+  }
+
+  start(): void {
+    // Run once immediately, then periodically
+    void this.reconcile();
+    this.intervalHandle = setInterval(() => {
+      void this.reconcile();
+    }, RECONCILE_INTERVAL_MS);
+    logger.info('Position reconciler started', { intervalMs: RECONCILE_INTERVAL_MS });
+  }
+
+  stop(): void {
+    if (this.intervalHandle !== null) {
+      clearInterval(this.intervalHandle);
+      this.intervalHandle = null;
+    }
+  }
+
+  /**
+   * Reconcile DB OPEN positions with actual wallet token balance.
+   * If wallet has 0 tokens but DB says OPEN → record SELL to close.
+   */
+  private async reconcile(): Promise<void> {
+    try {
+      const { container, connection, wallet, positionRegistry, tradeRepository, monitoredTrades } = this.config;
+
+      // Get all OPEN buys from DB
+      const openBuys = await tradeRepository.findOpenConfirmedBuys();
+      let reconciled = 0;
+
+      for (const trade of openBuys) {
+        const mintPk = new PublicKey(trade.mint);
+
+        // Check if wallet still holds this token
+        const hasBalance = await hasLiveTokenBalance(connection, wallet, mintPk);
+
+        if (!hasBalance) {
+          // Token is gone from wallet but DB says OPEN
+          // Record a SELL to close the gap
+          logger.warn('Reconciling stale position — token gone from wallet', {
+            tradeId: trade.id,
+            mint: trade.mint,
+          });
+
+          // Save a synthetic SELL trade to DB
+          await saveTrade(container, {
+            id: `sell-${trade.id}`,
+            mint: trade.mint,
+            side: 'SELL',
+            status: 'CONFIRMED',
+            amountSol: 0n, // Unknown actual amount
+            amountTokens: 0n,
+            signature: null,
+            slot: null,
+            submittedAt: nowMs(),
+            confirmedAt: nowMs(),
+            failureReason: 'RECONCILED: token balance 0 in wallet (manual sell or stale DB)',
+          });
+
+          // Remove from position registry if present
+          const pos = positionRegistry.get(trade.id);
+          if (pos) {
+            positionRegistry.transition(trade.id, 'EXITED', 'RECONCILED');
+          }
+
+          // Remove from monitoring
+          monitoredTrades.delete(trade.id);
+
+          reconciled += 1;
+        }
+      }
+
+      if (reconciled > 0) {
+        logger.info('Position reconciliation complete', { reconciled, total: openBuys.length });
+      }
+    } catch (err: unknown) {
+      logger.error('Position reconciliation failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}

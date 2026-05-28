@@ -20,13 +20,24 @@ export function recordPnlAndRisk(
   pnlUsd: number,
   reason: string,
   tradeId?: string,
+  mint?: string,
 ): void {
   const wasStopLoss = reason === 'STOP_LOSS' || reason === 'TIMEOUT' || reason === 'TRAILING_STOP';
 
   container.dailyLossGuard.recordTrade(pnlUsd, wasStopLoss);
 
-  if (wasStopLoss) {
+  // Blacklist token on stop-loss exits to prevent re-entry
+  if (wasStopLoss && mint) {
+    container.tokenBlacklist.handleStopLoss(mint);
+    logger.info('Token blacklisted after stop-loss exit', { tradeId, mint: mint.slice(0, 12) });
+  }
+
+  // Cooldown triggers on ALL exits except SCALE_OUT (partial sell — position
+  // still active, next tier should be reachable). Previously only triggered
+  // for SL/TIMEOUT/TRAILING which meant GRADUATED, KILL_SWITCH, ANTI_RUG
+  // exits had zero cooldown → bot immediately FOMO-bought the next token.
+  if (reason !== 'SCALE_OUT') {
     container.cooldownManager.activateCooldown();
-    logger.info('Cooldown activated after stop loss', { tradeId, reason });
+    logger.info('Cooldown activated after exit', { tradeId, reason, pnlUsd: pnlUsd.toFixed(4) });
   }
 }

@@ -1,37 +1,6 @@
 /**
- * Serialization utilities.
- *
- * Safe JSON serialization with BigInt support.
- * No silent data loss.
+ * ID generation utility.
  */
-
-/**
- * JSON stringify with BigInt support.
- * Converts BigInt to string with 'n' suffix for round-trip safety.
- */
-export function jsonStringify(value: unknown): string {
-  return JSON.stringify(value, (_key: string, val: unknown): unknown => {
-    if (typeof val === 'bigint') {
-      return `${val.toString()}n`;
-    }
-    return val;
-  });
-}
-
-/**
- * JSON parse with BigInt support.
- * Converts string values ending with 'n' back to BigInt.
- */
-export function jsonParse<T>(text: string): T {
-  return JSON.parse(text, (_key: string, val: unknown): unknown => {
-    if (typeof val === 'string' && /^-?\d+n$/.test(val)) {
-      return BigInt(val.slice(0, -1));
-    }
-    return val;
-  }) as T;
-}
-
-
 
 /** Generate a unique ID (signal/trade/position) */
 export function generateId(prefix: string): string {

@@ -9,6 +9,7 @@ import { parseBondingCurveData } from '../../adapters/protocols/pumpfun/tokenPar
 
 import { composeSwapInstructions } from '../../execution/tx/txComposer.js';
 import { DEFAULT_PUMPFUN_COMPUTE_BUDGET } from '../../execution/tx/computeBudgetBuilder.js';
+import { DEFAULT_MIN_TRADE_BALANCE_LAMPORTS } from '../../core/constants/defaults/infrastructure.js';
 import { buildUserAtaCreateInstruction } from '../../execution/tx/ataBuilder.js';
 import { GLOBAL_PDA, PUMP_FEE_CONFIG_PDA, toBN } from '../../adapters/protocols/pumpfun/officialPumpSdk.js';
 import { buildOfficialPumpfunBondingCurve, quoteOfficialPumpfunBuy } from '../../adapters/protocols/pumpfun/officialPumpfunQuote.js';
@@ -40,8 +41,8 @@ export async function executeBuy(params: BuyParams, runtime: ExecutionRuntime): 
   const balanceLamports = BigInt(walletBalance);
 
   // Minimum balance to execute ANY trade (position size + fees + rent)
-  // ~$1 position + 0.001 SOL fees + 0.002 SOL rent ≈ 0.015 SOL
-  const MIN_TRADE_BALANCE = 15_000_000n; // 0.015 SOL
+  // ~$0.10 position + 0.001 SOL fees + 0.002 SOL rent ≈ 0.005 SOL
+  const MIN_TRADE_BALANCE = DEFAULT_MIN_TRADE_BALANCE_LAMPORTS; // 0.005 SOL
 
   if (balanceLamports < MIN_TRADE_BALANCE) {
     const balanceSol = (walletBalance / 1e9).toFixed(6);
@@ -89,6 +90,18 @@ export async function executeBuy(params: BuyParams, runtime: ExecutionRuntime): 
     logger.warn('BUY BLOCKED — risk guard failed', { tradeId, reason: riskCheck.reason });
     return { success: false, tradeId, signature: null, error: riskCheck.reason ?? 'Risk guard failed' };
   }
+
+  // ── Atomic re-check + register (race condition guard) ───────────
+  // Two concurrent buys can both pass runRiskGuards() before either registers.
+  // Re-check position count SYNCHRONOUSLY right before register — JS single-
+  // thread guarantees this check+register is atomic (no await in between).
+  const activeCount = positionRegistry.getActiveCount();
+  if (activeCount >= container.maxExposureGuard.maxConcurrentPositions) {
+    logger.warn('BUY BLOCKED — position slot taken by concurrent buy', {
+      tradeId, activeCount, maxPositions: container.maxExposureGuard.maxConcurrentPositions,
+    });
+    return { success: false, tradeId, signature: null, error: 'Max positions reached (concurrent buy)' };
+  }
   logger.info('All risk guards passed', { tradeId });
 
   // ── Reserve Position Slot (race condition guard) ─────────────────
@@ -130,8 +143,12 @@ export async function executeBuy(params: BuyParams, runtime: ExecutionRuntime): 
 
   // ── Balance Check (position size) ────────────────────────────────
   // Balance already checked above for MIN_TRADE_BALANCE (0.015 SOL).
-  // Now check if enough for actual position size + TX fees.
-  const minRequired = positionSizeLamports + 1_000_000n;
+  // Now check if enough for actual position size + ATA rent + TX fees.
+  // ATA rent ≈ 0.00203928 SOL (2,039,280 lamports) for SPL token account
+  // TX fees ≈ 0.001 SOL (1,000,000 lamports)
+  const ATA_RENT_LAMPORTS = 2_039_280n;
+  const TX_FEE_LAMPORTS = 1_000_000n;
+  const minRequired = positionSizeLamports + ATA_RENT_LAMPORTS + TX_FEE_LAMPORTS;
 
   if (balanceLamports < minRequired) {
     const balanceSol = (walletBalance / 1e9).toFixed(6);
@@ -295,7 +312,28 @@ export async function executeBuy(params: BuyParams, runtime: ExecutionRuntime): 
 
       logger.info('Transaction built', { tradeId, attempt });
 
-      // 4. Sign and send
+      // 4. Balance re-check before submit (race condition guard)
+      // Two concurrent buys can both pass the earlier balance check.
+      // Re-check SYNCHRONOUSLY right before send — JS single-thread
+      // guarantees this check+send is atomic.
+      const currentBalance = await container.connection.getBalance(user);
+      const minRequiredAtSubmit = positionSizeLamports + 2_039_280n + 500_000n; // ATA rent + min fee
+      if (BigInt(currentBalance) < minRequiredAtSubmit) {
+        logger.warn('BUY BLOCKED — balance insufficient at submit time', {
+          tradeId,
+          currentBalance: (currentBalance / 1e9).toFixed(6),
+          required: (Number(positionSizeLamports + 500_000n) / 1e9).toFixed(6),
+        });
+        positionRegistry.transition(tradeId, 'EXITED', 'insufficient balance at submit');
+        return {
+          success: false,
+          tradeId,
+          signature: null,
+          error: `Balance insufficient at submit time: ${(currentBalance / 1e9).toFixed(6)} SOL`,
+        };
+      }
+
+      // 5. Sign and send
       const sendResult = await container.sendCoordinator.signAndSend({
         tradeId: `${tradeId}-attempt-${attempt}`,
         transaction: txResult.transaction,
@@ -316,56 +354,114 @@ export async function executeBuy(params: BuyParams, runtime: ExecutionRuntime): 
       // ── TX Confirmation ───────────────────────────────────────────
       // Wait for confirmation to see on-chain result
       const sig = sendResult.sendResult?.signature;
-      if (sig) {
-        lastSignature = sig;
-        logger.info('TX submitted, waiting for confirmation...', { tradeId, signature: sig });
-        try {
-          const confirmation = await container.connection.confirmTransaction(
-            { signature: sig, blockhash: txResult.blockhash, lastValidBlockHeight: txResult.lastValidBlockHeight },
-            'confirmed',
-          );
-          if (confirmation.value.err) {
-            const onChainErr = JSON.stringify(confirmation.value.err);
-            lastError = onChainErr;
-            logger.error('TX FAILED ON-CHAIN', {
-              tradeId, signature: sig, attempt, onChainError: onChainErr,
-            });
-            if (isPermanentError(onChainErr)) {
-              logger.warn('Permanent on-chain error — not retrying', { tradeId });
-              break;
-            }
-            continue; // retry
-          }
-          logger.info('TX CONFIRMED ON-CHAIN!', { tradeId, signature: sig });
-        } catch (confirmErr: unknown) {
-          const cmsg = confirmErr instanceof Error ? confirmErr.message : String(confirmErr);
-          lastError = cmsg;
-          logger.error('TX CONFIRMATION FAILED', { tradeId, signature: sig, attempt, error: cmsg });
-          if (isPermanentError(cmsg)) {
-            logger.warn('Permanent confirmation error — not retrying', { tradeId });
+      if (!sig) {
+        // Send succeeded but no signature — this is a bug in sendCoordinator.
+        // Treat as failed attempt and retry.
+        lastError = 'Send succeeded but no signature returned';
+        logger.error('BUY FAILED — no signature from sendCoordinator', { tradeId, attempt });
+        continue;
+      }
+
+      lastSignature = sig;
+      logger.info('TX submitted, waiting for confirmation...', { tradeId, signature: sig });
+      try {
+        const confirmation = await container.connection.confirmTransaction(
+          { signature: sig, blockhash: txResult.blockhash, lastValidBlockHeight: txResult.lastValidBlockHeight },
+          'confirmed',
+        );
+        if (confirmation.value.err) {
+          const onChainErr = JSON.stringify(confirmation.value.err);
+          lastError = onChainErr;
+          logger.error('TX FAILED ON-CHAIN', {
+            tradeId, signature: sig, attempt, onChainError: onChainErr,
+          });
+          if (isPermanentError(onChainErr)) {
+            logger.warn('Permanent on-chain error — not retrying', { tradeId });
             break;
           }
           continue; // retry
         }
+        logger.info('TX CONFIRMED ON-CHAIN!', { tradeId, signature: sig });
+      } catch (confirmErr: unknown) {
+        const cmsg = confirmErr instanceof Error ? confirmErr.message : String(confirmErr);
+        lastError = cmsg;
+        logger.error('TX CONFIRMATION FAILED', { tradeId, signature: sig, attempt, error: cmsg });
+
+        // CRITICAL: Before retrying, check if the TX actually landed.
+        // confirmTransaction can throw on RPC timeout even though the TX
+        // is confirmed on-chain. Retrying would double-buy.
+        try {
+          const status = await container.connection.getSignatureStatus(sig);
+          if (status?.value?.confirmationStatus === 'confirmed' ||
+              status?.value?.confirmationStatus === 'finalized') {
+            logger.warn('TX actually confirmed despite confirmation error — proceeding', {
+              tradeId, signature: sig,
+            });
+            // Fall through to accounting — TX landed, don't retry
+          } else if (status?.value?.err) {
+            logger.info('TX confirmed as failed — safe to retry', { tradeId, signature: sig });
+            if (isPermanentError(cmsg)) break;
+            continue;
+          } else {
+            // TX status unknown — could still be in-flight.
+            // Wait briefly then check once more before giving up.
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+            const recheck = await container.connection.getSignatureStatus(sig);
+            if (recheck?.value?.confirmationStatus === 'confirmed' ||
+                recheck?.value?.confirmationStatus === 'finalized') {
+              logger.warn('TX confirmed on recheck — proceeding', { tradeId, signature: sig });
+            } else {
+              logger.warn('TX still unconfirmed after recheck — retrying', { tradeId, signature: sig });
+              if (isPermanentError(cmsg)) break;
+              continue;
+            }
+          }
+        } catch (statusErr: unknown) {
+          logger.error('Failed to check TX status — retrying', {
+            tradeId, signature: sig,
+            error: statusErr instanceof Error ? statusErr.message : String(statusErr),
+          });
+          if (isPermanentError(cmsg)) break;
+          continue;
+        }
       }
 
-      logger.info('BUY SUCCESS', { tradeId, signature: sig });
-
-      const buyAccounting = sig
-        ? await getConfirmedBuyAmountSol({
-          connection: container.connection,
-          signature: sig,
-          wallet: user,
-          fallbackLamports: positionSizeLamports,
-          tradeId,
-        })
-        : {
+      // ── On-chain Accounting (NEVER retry after confirmation) ────
+      // If accounting fails, use fallback amount. NEVER trigger a retry
+      // because the TX already landed on-chain — retrying would double-buy.
+      let buyAccounting: { amountSolLamports: bigint; walletDeltaLamports: bigint; feeLamports: bigint; rentPaidLamports: bigint; rentRefundedLamports: bigint };
+      try {
+        buyAccounting = sig
+          ? await getConfirmedBuyAmountSol({
+            connection: container.connection,
+            signature: sig,
+            wallet: user,
+            fallbackLamports: positionSizeLamports,
+            tradeId,
+          })
+          : {
+            amountSolLamports: positionSizeLamports,
+            walletDeltaLamports: -positionSizeLamports,
+            feeLamports: 0n,
+            rentPaidLamports: 0n,
+            rentRefundedLamports: 0n,
+          };
+      } catch (accountingErr: unknown) {
+        const amsg = accountingErr instanceof Error ? accountingErr.message : String(accountingErr);
+        logger.error('On-chain accounting failed — using fallback amount (TX already confirmed, NOT retrying)', {
+          tradeId, signature: sig, error: amsg, fallbackLamports: positionSizeLamports.toString(),
+        });
+        buyAccounting = {
           amountSolLamports: positionSizeLamports,
           walletDeltaLamports: -positionSizeLamports,
           feeLamports: 0n,
           rentPaidLamports: 0n,
           rentRefundedLamports: 0n,
         };
+      }
+
+      logger.info('BUY SUCCESS', { tradeId, signature: sig });
+
       const confirmedBuyAmountSol = buyAccounting.amountSolLamports;
       logger.info('BUY on-chain accounting resolved', {
         tradeId,

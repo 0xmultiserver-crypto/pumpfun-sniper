@@ -19,6 +19,7 @@
 
 import type { MintAddress } from '../../core/types/token.js';
 import type { IDetector, SignalHandler } from '../../core/interfaces/detector.js';
+import type { SmartMoneySignal } from '../../core/types/signal.js';
 import { LRUCache } from '../../core/utils/lruCache.js';
 import { nowMs } from '../../core/utils/time.js';
 import { createLogger } from '../../telemetry/logging/logger.js';
@@ -159,6 +160,7 @@ export class SmartMoneyDetector implements IDetector {
   readonly name = 'smart-money-detector';
 
   private readonly handlers: SignalHandler[] = [];
+  private signalCounter = 0;
 
   private readonly maxSmartWallets: number;
   private readonly pumpThresholdMultiplier: number;
@@ -229,6 +231,19 @@ export class SmartMoneyDetector implements IDetector {
 
   onSignal(handler: SignalHandler): void {
     this.handlers.push(handler);
+  }
+
+  private emit(signal: SmartMoneySignal): void {
+    for (const handler of this.handlers) {
+      try {
+        handler(signal);
+      } catch (err: unknown) {
+        logger.error('Signal handler threw', {
+          signalId: signal.id,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -319,6 +334,19 @@ export class SmartMoneyDetector implements IDetector {
 
     if (isDetected) {
       smartMoneyDetectionsTotal.inc();
+
+      this.signalCounter += 1;
+      this.emit({
+        id: `smartmoney-${this.signalCounter}-${nowMs()}`,
+        type: 'SMART_MONEY',
+        mint,
+        timestamp: nowMs(),
+        slot: 0,
+        smartWalletCount,
+        smartMoneyScore,
+        wallets: detectedSmartWallets.map((w) => w.wallet),
+      });
+
       logger.info('Smart money detected', {
         mint: mint.slice(0, 12),
         smartWalletCount,
@@ -425,7 +453,7 @@ export class SmartMoneyDetector implements IDetector {
 
       // Diminishing returns: each additional win adds less
       const diminishingFactor = 1 / (1 + entry.winningTokenCount * 0.3);
-      entry.score = Math.min(entry.score + scoreIncrement * diminishingFactor + scoreIncrement, 2.0);
+      entry.score = Math.min(entry.score + scoreIncrement * diminishingFactor, 2.0);
       entry.lastUpdatedAt = nowMs();
     }
   }

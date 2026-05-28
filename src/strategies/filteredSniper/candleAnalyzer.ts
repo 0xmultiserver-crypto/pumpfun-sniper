@@ -65,7 +65,7 @@ export interface ExitSignalAnalysis {
  * Determine whether a candle is "red" (bearish).
  * A candle is red when the close is below the open.
  */
-export function isCandleRed(candle: CandleData): boolean {
+function isCandleRed(candle: CandleData): boolean {
   return candle.close < candle.open;
 }
 

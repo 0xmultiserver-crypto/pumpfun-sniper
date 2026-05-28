@@ -20,6 +20,15 @@ function makeRuntime(registry: PositionRegistry): ExecutionRuntime {
       tradeRepository: {
         save: async () => undefined,
       },
+      cooldownManager: {
+        activateCooldown: () => undefined,
+      },
+      dailyLossGuard: {
+        recordTrade: () => undefined,
+      },
+      solPriceOracle: {
+        getSolPriceUsd: async () => 150,
+      },
     },
     positionRegistry: registry,
     pumpSdk: {},

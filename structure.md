@@ -2,7 +2,7 @@
 
 ```
 src/
-├── main.ts                              # Bootstrap + WS wiring (~235 lines)
+├── main.ts                              # Bootstrap + WS wiring (~470 lines)
 │
 ├── app/                                 # Orchestration & DI
 │   ├── bootstrap.ts                     # Config loading + container creation
@@ -14,76 +14,102 @@ src/
 │   ├── solPriceOracle.ts                # SOL/USD price (Jupiter → CoinGecko → fallback)
 │   ├── wsManager.ts                     # WebSocket with auto-reconnect
 │   ├── positionRecovery.ts              # Startup DB recovery + live balance check
+│   ├── positionReconciler.ts            # Periodic DB ↔ wallet position sync
 │   └── execution/
 │       ├── buyExecutor.ts               # BUY orchestration (quote → TX → confirm)
 │       ├── sellExecutor.ts              # SELL orchestration (Pumpfun/Jupiter)
-│       ├── riskGuardRunner.ts           # 5 risk guards check (shared)
+│       ├── riskGuardRunner.ts           # Risk guards check (shared)
 │       ├── tradeRecorder.ts             # DB persistence (shared)
 │       ├── pnlRecorder.ts               # P&L + risk state updates (shared)
+│       ├── onChainAccounting.ts         # On-chain SOL accounting for P&L
+│       ├── rentReclaimer.ts             # Close empty token accounts for rent
 │       └── runtime.ts                   # ExecutionRuntime interface
 │
 ├── core/                                # Pure types, constants, interfaces
 │   ├── config/
 │   │   └── env.ts                       # .env loader
 │   ├── constants/
-│   │   ├── defaults.ts                  # ALL config values (single source of truth)
+│   │   ├── defaults.ts                  # Barrel re-export → defaults/*
+│   │   ├── defaults/
+│   │   │   ├── trading.ts               # Position sizing, TP/SL, trailing, scale-out
+│   │   │   ├── detection.ts             # Momentum, creator history, entry checks
+│   │   │   ├── infrastructure.ts        # RPC, DB, WebSocket, compute budget, SOL price
+│   │   │   ├── risk.ts                  # Daily kill switch, cooldown, anti-rug
+│   │   │   └── jito.ts                  # Jito MEV tip
 │   │   ├── programs.ts                  # Solana program IDs
 │   │   └── timeouts.ts                  # RPC/shutdown timeouts
 │   ├── errors/
-│   │   └── rpc.error.ts                 # RPC error types
+│   │   └── rpc.error.ts                 # RpcError, RpcTimeoutError
 │   ├── interfaces/
 │   │   ├── detector.ts                  # IDetector, SignalHandler
-│   │   ├── heuristic.ts                 # IHeuristic, HeuristicResult
-│   │   ├── replayStrategy.ts            # IReplayStrategy
 │   │   ├── signer.ts                    # ISigner
-│   │   ├── storage.ts                   # IStorage
+│   │   ├── storage.ts                   # IRepository
 │   │   └── strategy.ts                  # IStrategy
 │   ├── state/
 │   │   └── positionRegistry.ts          # Active positions (single source of truth)
 │   ├── types/
-│   │   ├── execution.ts                 # ComputeBudgetParams
-│   │   ├── position.ts                  # Position types
-│   │   ├── risk.ts                      # DailyPnl, KillSwitchState
-│   │   ├── runtime.ts                   # HealthStatus
-│   │   ├── signal.ts                    # LaunchEvent, Signal union
-│   │   ├── strategy.ts                  # ExitReason
-│   │   ├── telemetry.ts                 # Log context types
-│   │   ├── token.ts                     # MintAddress, TokenMetadata
-│   │   ├── trade.ts                     # TradeRecord
-│   │   └── wallet.ts                    # WalletAddress
+│   │   ├── execution.ts                 # ExecutionVenue, SwapDirection, ComputeBudgetParams
+│   │   ├── position.ts                  # Position, PositionStatus
+│   │   ├── signal.ts                    # Signal union (12 signal types)
+│   │   ├── strategy.ts                  # ExitReason, SkipReason
+│   │   ├── telemetry.ts                 # LogLevel
+│   │   ├── token.ts                     # MintAddress, TokenMetadata, BondingCurveState
+│   │   ├── trade.ts                     # TradeRecord, TradeId
+│   │   └── wallet.ts                    # WalletAddress, TokenAccount
 │   └── utils/
-│       ├── dedupe.ts                     # Deduplication helpers
-│       ├── serialization.ts             # JSON serialization
-│       └── time.ts                      # nowMs()
+│       ├── boundedMap.ts                # Generic bounded map with eviction
+│       ├── dedupe.ts                    # Deduplication helpers
+│       ├── lruCache.ts                  # LRU cache
+│       ├── serialization.ts             # ID generation
+│       ├── time.ts                      # nowMs(), elapsedMs()
+│       └── unionFind.ts                 # Union-Find for wallet clustering
 │
 ├── strategies/                          # Business logic (NO IO)
 │   └── filteredSniper/
 │       ├── filteredSniperStrategy.ts    # Main strategy class (entry + exit)
 │       ├── filteredSniperRules.ts       # Re-exports from defaults.ts
-│       ├── entryDecision.ts             # 9 entry checks evaluation
-│       └── exitDecision.ts             # TP/SL/timeout evaluation
+│       ├── entryDecision.ts             # 13 entry checks evaluation
+│       ├── exitDecision.ts              # TP/SL/timeout evaluation
+│       ├── positionSizer.ts             # Dynamic position sizing by market cap
+│       ├── candleAnalyzer.ts            # Candle data tracking
+│       └── compoundManager.ts           # Profit compounding logic
 │
 ├── detectors/                           # Signal detection
 │   ├── launch/
 │   │   └── launchDetector.ts            # WS launch event → LaunchSignal
 │   ├── momentum/
-│   │   ├── momentumDetector.ts          # Buy count + volume → MomentumSignal
-│   │   ├── holderGrowthDetector.ts      # New holder tracking
-│   │   └── volumeAccelerationDetector.ts # Volume acceleration
-│   └── lifecycle/
-│       └── migrationDetector.ts         # Bonding curve → Raydium migration
+│   │   └── momentumDetector.ts          # Buy count + volume → MomentumSignal
+│   ├── lifecycle/
+│   │   └── migrationDetector.ts         # Bonding curve → Raydium migration
+│   ├── bundle/
+│   │   └── bundleDetector.ts            # Clustered wallet buys → BundleSignal
+│   ├── washTrade/
+│   │   └── washTradeDetector.ts         # Wash trade patterns → WashTradeSignal
+│   ├── cabal/
+│   │   └── cabalDetector.ts             # Coordinated wallet clusters → CabalSignal
+│   ├── dayPhase/
+│   │   └── dayPhaseDetector.ts          # ATH dip + sideways → DayPhaseSignal
+│   ├── dexPaid/
+│   │   └── dexPaidDetector.ts           # Late DEX listing → DexPaidSignal
+│   ├── holderConcentration/
+│   │   └── concentrationAnalyzer.ts     # High concentration → ConcentrationSignal
+│   ├── smartMoney/
+│   │   └── smartMoneyDetector.ts        # Smart wallet activity → SmartMoneySignal
+│   └── revoke/
+│       └── revokeAnalyzer.ts            # Authority revoke timing → RevokeSignal
 │
 ├── risk/                                # Risk guards & controls
 │   ├── blacklist/
-│   │   ├── creatorBlacklist.ts          # Creator wallet blacklist
-│   │   └── tokenBlacklist.ts            # Token blacklist
+│   │   ├── creatorBlacklist.ts          # Creator wallet blacklist (BoundedMap)
+│   │   └── tokenBlacklist.ts            # Token blacklist (BoundedMap)
 │   ├── controls/
 │   │   ├── emergencyKillSwitch.ts       # Global on/off
-│   │   ├── dailyLossGuard.ts            # $40/day loss limit
-│   │   ├── cooldownManager.ts           # 5min cooldown after SL
-│   │   └── tradeThrottle.ts             # Rate limiting
+│   │   ├── dailyLossGuard.ts            # Daily loss limit
+│   │   ├── cooldownManager.ts           # Cooldown after SL
+│   │   ├── tradeThrottle.ts             # Rate limiting
+│   │   └── antiRug.ts                   # Rug pull monitor
 │   └── exposure/
-│       └── maxExposureGuard.ts          # Max 1 concurrent position
+│       └── maxExposureGuard.ts          # Max concurrent positions
 │
 ├── execution/                           # TX infrastructure
 │   ├── venues/
@@ -93,12 +119,17 @@ src/
 │   │   ├── txBuilder.ts                 # Transaction assembly
 │   │   ├── txComposer.ts                # Instruction composition
 │   │   ├── ataBuilder.ts                # ATA creation (Token-2022 aware)
-│   │   └── computeBudgetBuilder.ts      # Priority fees
+│   │   ├── computeBudgetBuilder.ts      # Priority fees
+│   │   └── cuEstimator.ts               # Dynamic CU estimation (EMA)
 │   ├── sender/
 │   │   ├── sendCoordinator.ts           # Dedup + sign + send
 │   │   └── rpcSender.ts                 # Raw RPC send
 │   ├── signing/
 │   │   └── keypairSigner.ts             # Wallet signing
+│   ├── jito/
+│   │   └── jitoClient.ts                # Jito bundle submission
+│   ├── multiWallet/
+│   │   └── walletDistributor.ts         # Multi-wallet distribution
 │   └── lifecycle/
 │       └── tradeLifecycleManager.ts     # Position state machine
 │
@@ -112,7 +143,7 @@ src/
 │       ├── authorityInspector.ts        # Mint/freeze authority check
 │       ├── eventDecoder.ts              # Pump.fun log event decoder
 │       ├── launchParser.ts              # CREATE instruction parser
-│       ├── migrationDetector.ts         # MIGRATION log detector
+│       ├── migrationDetector.ts         # MIGRATION log detector (detectFromLogs only)
 │       ├── pumpfunTradeBuilder.ts       # BUY/SELL instruction builder
 │       ├── officialPumpSdk.ts           # @pump-fun/pump-sdk CJS wrapper
 │       └── officialPumpfunQuote.ts      # SDK quote/fee math
@@ -123,22 +154,10 @@ src/
 │   │   ├── eventNormalizer.ts           # Raw events → NormalizedEvent
 │   │   └── eventDispatcher.ts           # Event routing
 │   └── rpc/
-│       ├── rpcClient.ts                 # RPC client with failover
+│       ├── rpcClient.ts                 # RPC client with rate limiting
 │       ├── rpcPool.ts                   # Multi-endpoint pool
 │       ├── rpcFailover.ts               # Failover logic
-│       └── rateLimiter.ts               # Request rate limiting
-│
-├── risk/                                # Risk management
-│   ├── blacklist/
-│   │   ├── creatorBlacklist.ts          # Creator blacklist (in-memory)
-│   │   └── tokenBlacklist.ts            # Token blacklist
-│   ├── controls/
-│   │   ├── emergencyKillSwitch.ts       # Global kill switch
-│   │   ├── dailyLossGuard.ts            # Daily P&L tracking
-│   │   ├── cooldownManager.ts           # Post-SL cooldown (5 min)
-│   │   └── tradeThrottle.ts             # Trade rate limiting
-│   └── exposure/
-│       └── maxExposureGuard.ts          # Max concurrent positions (1)
+│       └── rateLimiter.ts               # Token bucket rate limiter
 │
 ├── storage/                             # Persistence
 │   ├── postgres/
@@ -147,15 +166,25 @@ src/
 │   │   └── redisClient.ts               # Redis client
 │   ├── repositories/
 │   │   ├── tradeRepository.ts           # Trade CRUD
-│   │   └── signalRepository.ts          # Signal CRUD
+│   │   ├── signalRepository.ts          # Signal CRUD (12 signal types)
+│   │   ├── creatorStatsRepository.ts    # Creator statistics
+│   │   └── riskStateRepository.ts       # Risk state persistence
 │   └── backfill/
 │       └── pnlBackfill.ts               # On-chain P&L backfill script
 │
 ├── telemetry/                           # Observability
 │   ├── logging/
-│   │   └── logger.ts                    # Structured logger (pino-style)
+│   │   └── logger.ts                    # Structured logger (pino)
 │   └── metrics/
-│       └── ingestionMetrics.ts          # RPC/event metrics (no-op stubs)
+│       ├── prometheus.ts                # Prometheus registry + counters
+│       ├── httpServer.ts                # /metrics HTTP endpoint
+│       └── ingestionMetrics.ts          # RPC/event metric wrappers
+│
+├── backtest/                            # Backtesting engine
+│   ├── cli.ts                           # Backtest CLI entry point
+│   ├── replayEngine.ts                  # Event replay engine
+│   ├── eventRecorder.ts                 # Backtest event storage
+│   └── analytics.ts                     # P&L analytics + reporting
 │
 └── tests/                               # Test suite (Vitest)
     ├── unit/
@@ -163,6 +192,7 @@ src/
     │   ├── risk/                        # Risk guard tests
     │   ├── execution/                   # TX building tests
     │   ├── lifecycle/                   # Migration/lifecycle tests
+    │   ├── detectors/                   # Detector tests
     │   └── *.test.ts                    # Misc unit tests
     └── integration/
         ├── pipelineIntegrationTest.ts   # Full pipeline harness
@@ -173,16 +203,33 @@ src/
 
 | Layer | Directory | Responsibility | External Deps |
 |---|---|---|---|
-| **Core** | `core/` | Types, constants, interfaces | None |
+| **Core** | `core/` | Types, constants, interfaces, utils | None |
 | **Strategy** | `strategies/` | Business logic (entry/exit) | None (pure) |
-| **Detectors** | `detectors/` | Signal detection | None (pure) |
+| **Detectors** | `detectors/` | Signal detection (12 detectors) | None (pure) |
 | **Risk** | `risk/` | Risk guards & controls | None (pure) |
 | **App** | `app/` | Orchestration, DI, wiring | All layers |
 | **Execution** | `execution/` | TX building, sending | Solana |
 | **Adapters** | `adapters/` | Protocol integration | Pump.fun, Jupiter |
 | **Ingestion** | `ingestion/` | RPC, WebSocket | Solana RPC |
 | **Storage** | `storage/` | PostgreSQL, Redis | pg, redis |
-| **Telemetry** | `telemetry/` | Logging | pino |
+| **Telemetry** | `telemetry/` | Logging, metrics | pino, prom-client |
+
+## Signal Types (12)
+
+| Detector | Signal Type | Trigger |
+|---|---|---|
+| LaunchDetector | `LAUNCH` | New token creation on Pump.fun |
+| MomentumDetector | `MOMENTUM` | Buy count + volume threshold |
+| MigrationSignalDetector | `MIGRATION` | Bonding curve → Raydium graduation |
+| BundleDetector | `BUNDLE` | Clustered wallet buys |
+| WashTradeDetector | `WASH_TRADE` | Wash trade patterns |
+| CabalDetector | `CABAL` | Coordinated wallet clusters |
+| DayPhaseDetector | `DAY_PHASE` | ATH dip + sideways cooldown |
+| DexPaidDetector | `DEX_PAID` | Late DEX listing (entry signal) |
+| ConcentrationAnalyzer | `CONCENTRATION` | High holder concentration |
+| SmartMoneyDetector | `SMART_MONEY` | Smart wallet activity |
+| RevokeAnalyzer | `REVOKE` | Authority revoke timing |
+| (LiquidityPhase) | `LIQUIDITY_PHASE` | Bonding/graduated phase |
 
 ## Data Flow
 
@@ -190,26 +237,31 @@ src/
 WebSocket → wsMessageHandler → eventDecoder/launchParser
   → launchDetector → LAUNCH signal
   → momentumDetector → MOMENTUM signal
+  → bundleDetector → BUNDLE signal
+  → washTradeDetector → WASH_TRADE signal
+  → cabalDetector → CABAL signal
+  → ... (12 detectors total)
     → strategy.onSignal()
       → dataProvider.getEntryCheckData() [RPC fetch]
       → entryCheckEvaluator [boolean evaluation]
-      → evaluateEntry() [9 checks]
+      → evaluateEntry() [13 checks]
         → ALL PASS → riskGuardRunner → buyExecutor → TX → chain
         → ANY FAIL → reject (log reason)
 
-Exit monitoring (2s poll):
+Exit monitoring (1s poll):
   → dataProvider.getPositionData() [RPC fetch]
-  → evaluateExit() [TP/SL/timeout]
+  → evaluateExit() [TP/SL/trailing/timeout/scale-out]
     → TRIGGER → sellExecutor → TX → chain
 ```
 
 ## Key Files
 
-- **Config source of truth**: `core/constants/defaults.ts`
-- **Entry rules**: `strategies/filteredSniper/entryDecision.ts`
+- **Config source of truth**: `core/constants/defaults.ts` → `defaults/*.ts`
+- **Entry rules**: `strategies/filteredSniper/entryDecision.ts` (13 checks)
 - **Exit rules**: `strategies/filteredSniper/exitDecision.ts`
 - **Entry check evaluation**: `app/entryCheckEvaluator.ts`
 - **Data fetching**: `app/dataProvider.ts`
 - **Risk guards**: `app/execution/riskGuardRunner.ts`
 - **Bonding curve parsing**: `adapters/protocols/pumpfun/tokenParser.ts`
 - **Authority checking**: `adapters/protocols/pumpfun/authorityInspector.ts`
+- **Bounded map utility**: `core/utils/boundedMap.ts`

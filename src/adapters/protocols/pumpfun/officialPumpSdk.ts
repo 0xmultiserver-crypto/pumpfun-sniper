@@ -11,8 +11,6 @@ const pumpSdk = require('@pump-fun/pump-sdk');
 export const PumpSdk = pumpSdk.PumpSdk as new () => any;
 export const GLOBAL_PDA = pumpSdk.GLOBAL_PDA;
 export const PUMP_FEE_CONFIG_PDA = pumpSdk.PUMP_FEE_CONFIG_PDA;
-export const NATIVE_QUOTE_MINT = pumpSdk.NATIVE_MINT ?? undefined;
-
 export const getBuyTokenAmountFromSolAmount = pumpSdk.getBuyTokenAmountFromSolAmount as (args: {
   global: any;
   feeConfig: any | null;

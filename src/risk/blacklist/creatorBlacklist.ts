@@ -13,6 +13,7 @@
 
 import type { WalletAddress } from '../../core/types/wallet.js';
 import type { RiskStateRepository } from '../../storage/repositories/riskStateRepository.js';
+import { BoundedMap } from '../../core/utils/boundedMap.js';
 import { nowMs } from '../../core/utils/time.js';
 import { createLogger } from '../../telemetry/logging/logger.js';
 
@@ -45,17 +46,22 @@ export interface CreatorBlacklistConfig {
 // ---------------------------------------------------------------------------
 
 export class CreatorBlacklist {
-  private readonly entries = new Map<WalletAddress, BlacklistEntry>();
-  private readonly maxEntries: number;
+  private readonly entries: BoundedMap<WalletAddress, BlacklistEntry>;
   private readonly autoBlacklistOnSl: boolean;
   private readonly riskStateRepo: RiskStateRepository | null;
 
   private static readonly STATE_KEY = 'creator_blacklist';
 
   constructor(config?: CreatorBlacklistConfig) {
-    this.maxEntries = config?.maxEntries ?? 10_000;
+    const maxEntries = config?.maxEntries ?? 10_000;
     this.autoBlacklistOnSl = config?.autoBlacklistOnSl ?? true;
     this.riskStateRepo = config?.riskStateRepo ?? null;
+
+    this.entries = new BoundedMap<WalletAddress, BlacklistEntry>({
+      maxSize: maxEntries,
+      // Prefer evicting auto-added entries over manually-added ones
+      preferEvict: (_key, entry) => entry.autoAdded,
+    });
   }
 
   /**
@@ -71,11 +77,7 @@ export class CreatorBlacklist {
   add(wallet: WalletAddress, reason: string, autoAdded: boolean): void {
     if (this.entries.has(wallet)) return;
 
-    // Enforce max entries — evict oldest auto-added entries
-    if (this.entries.size >= this.maxEntries) {
-      this.evictOldest();
-    }
-
+    // BoundedMap handles eviction (prefers auto-added entries)
     this.entries.set(wallet, {
       wallet,
       reason,
@@ -114,7 +116,7 @@ export class CreatorBlacklist {
    * Get all blacklisted wallets.
    */
   getAll(): readonly BlacklistEntry[] {
-    return Array.from(this.entries.values());
+    return this.entries.toArray();
   }
 
   /**
@@ -132,33 +134,6 @@ export class CreatorBlacklist {
       this.add(wallet, reason, false);
     }
     logger.info('Blacklist bulk loaded', { size: this.entries.size });
-  }
-
-  private evictOldest(): void {
-    let oldestKey: WalletAddress | null = null;
-    let oldestTime = Infinity;
-
-    for (const [key, entry] of this.entries) {
-      // Prefer evicting auto-added entries
-      if (entry.autoAdded && entry.addedAt < oldestTime) {
-        oldestTime = entry.addedAt;
-        oldestKey = key;
-      }
-    }
-
-    // If no auto-added, evict any oldest
-    if (oldestKey === null) {
-      for (const [key, entry] of this.entries) {
-        if (entry.addedAt < oldestTime) {
-          oldestTime = entry.addedAt;
-          oldestKey = key;
-        }
-      }
-    }
-
-    if (oldestKey !== null) {
-      this.entries.delete(oldestKey);
-    }
   }
 
   // -----------------------------------------------------------------------
@@ -182,7 +157,7 @@ export class CreatorBlacklist {
       }
 
       for (const entry of saved) {
-        // Use set directly to avoid triggering saveToDb on each entry
+        // Use BoundedMap.set directly to avoid triggering saveToDb on each entry
         this.entries.set(entry.wallet, entry);
       }
 
@@ -197,7 +172,7 @@ export class CreatorBlacklist {
   private saveToDb(): void {
     if (this.riskStateRepo === null) return;
 
-    const entries = Array.from(this.entries.values());
+    const entries = this.entries.toArray();
     void this.riskStateRepo.saveState(CreatorBlacklist.STATE_KEY, entries);
   }
 }

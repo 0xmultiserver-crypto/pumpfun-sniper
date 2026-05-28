@@ -28,26 +28,9 @@ export interface SendResult {
   readonly slot: number | null;
 }
 
-/** Transaction confirmation result */
-export interface ConfirmationResult {
-  readonly signature: string;
-  readonly confirmed: boolean;
-  readonly slot: number;
-  readonly confirmationLatencyMs: number;
-  readonly error: string | null;
-}
-
 /** Compute budget parameters */
 export interface ComputeBudgetParams {
   readonly computeUnitLimit: number;
   readonly computeUnitPrice: bigint;
 }
 
-/** Priority fee estimate */
-export interface PriorityFeeEstimate {
-  readonly low: bigint;
-  readonly medium: bigint;
-  readonly high: bigint;
-  readonly veryHigh: bigint;
-  readonly estimatedAt: number;
-}

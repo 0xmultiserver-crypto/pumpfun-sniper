@@ -99,6 +99,10 @@ export class MockDataProvider implements StrategyDataProvider {
   getActivePositionCount(): number {
     return this.activePositionCount;
   }
+
+  isTokenBlacklisted(_mint: string): boolean {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -183,9 +187,15 @@ export function createPassingEntryData(mint: MintAddress): EntryCheckData {
     liquiditySane: true,
     walletConcentrationAcceptable: true,
     buyCountInWindow: MOMENTUM_MIN_BUYS,
-    volumeLamports: 1_000_000_000n,
+    volumeLamports: 2_000_000_000n,
     windowMs: MOMENTUM_WINDOW_SECONDS * 1000,
     priceImpactBps: null,
+    bundlePct: 10,
+    washTradeScore: 20,
+    uniqueWallets: 15,
+    sellCountInWindow: 3,
+    realSolReservesLamports: 1_000_000_000n,
+    holderCount: 50,
   };
 }
 

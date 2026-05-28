@@ -41,7 +41,7 @@ const logger = createLogger('app:bootstrap');
  *   - ALCHEMY_API_KEY (empty = disabled)
  *   - SOLANA_WS_URL (default: wss://mainnet.helius-rpc.com/?api-key=<HELIUS_KEY>)
  */
-export function loadConfig(): AppConfig {
+function loadConfig(): AppConfig {
   const heliusApiKey = requireEnv('HELIUS_API_KEY');
   const publicNodeUrl = optionalEnv('PUBLICNODE_RPC_URL', 'https://solana-rpc.publicnode.com');
   const alchemyApiKey = optionalEnv('ALCHEMY_API_KEY', '');

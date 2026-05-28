@@ -41,7 +41,7 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
- * ALL 10 entry checks from rule.md. No shortcuts.
+ * ALL 16 entry checks from rule.md. No shortcuts.
  *
  *   1. launch detected
  *   2. creator not blacklisted
@@ -54,7 +54,7 @@ import {
  *   9. momentum threshold met
  *  10. price impact acceptable
  */
-export const ENTRY_CHECK_COUNT = 10;
+export const ENTRY_CHECK_COUNT = 18;
 
 /** Price impact rule: max price impact in basis points. LOCKED. */
 export const MAX_PRICE_IMPACT_BPS = DEFAULT_MAX_PRICE_IMPACT_BPS;

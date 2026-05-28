@@ -82,9 +82,12 @@ export interface ExitDecisionResult {
  *
  * Priority order:
  *   1. Kill switch (highest priority — immediate exit)
- *   2. Stop loss (protect capital)
- *   3. Take profit (lock gains)
- *   4. Timeout (prevent stale positions)
+ *   2. Scale-out (partial profit taking)
+ *   3. Trailing stop (lock profits from high)
+ *   4. Anti-rug (suspicious dump detected)
+ *   5. Stop loss (protect capital)
+ *   6. Take profit (lock gains)
+ *   7. Timeout (prevent stale positions)
  *
  * P&L calculation uses BigInt to avoid floating point errors.
  * pnlPercent = ((current - entry) * 10000 / entry) / 100
@@ -94,24 +97,9 @@ export function evaluateExit(data: PositionData): ExitDecisionResult {
   const now = nowMs();
   const elapsedMs = now - data.openedAt;
 
-  // --- Check 0: Graduated token (bonding curve complete) ---
-  // When a token graduates, bonding curve reserves are drained so PnL
-  // from bonding curve price is meaningless (shows -100%). Route to
-  // Jupiter sell immediately instead of triggering false STOP_LOSS.
-  if (data.graduated) {
-    logger.info('Exit decision: TOKEN GRADUATED — routing to Jupiter', {
-      tradeId: data.tradeId,
-      mint: data.mint,
-      elapsedMs,
-    });
-    return {
-      shouldExit: true,
-      reason: 'GRADUATED',
-      pnlPercent: 0, // PnL unknown until Jupiter quote
-      elapsedMs,
-      explanation: 'Token graduated from bonding curve — sell via Jupiter',
-    };
-  }
+  // GRADUATED tokens: no longer auto-sell. After graduation to Raydium,
+  // dataProvider fetches real Jupiter price so trailing/SL/TP work normally.
+  // This lets us ride post-graduation pumps instead of selling immediately.
 
   // Calculate P&L in basis points using BigInt
   // pnlBps = (current - entry) * 10000n / entry
@@ -255,7 +243,7 @@ export function evaluateExit(data: PositionData): ExitDecisionResult {
     };
   }
 
-  // --- Check 4: Timeout ---
+  // --- Check 5: Timeout ---
   if (elapsedMs >= TIMEOUT_MS) {
     logger.info('Exit decision: TIMEOUT triggered', {
       tradeId: data.tradeId,

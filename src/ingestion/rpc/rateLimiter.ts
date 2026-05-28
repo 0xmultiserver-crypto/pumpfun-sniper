@@ -73,6 +73,11 @@ export class RateLimiter {
     await new Promise((resolve) => setTimeout(resolve, waitMs));
 
     this.refill();
+    // Guard against negative tokens when multiple waiters resume in same tick
+    if (this.tokens < 1) {
+      this.tokens = 0;
+      return;
+    }
     this.tokens -= 1;
   }
 

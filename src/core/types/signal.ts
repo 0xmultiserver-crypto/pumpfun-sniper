@@ -8,7 +8,7 @@ import type { MintAddress } from './token.js';
 import type { WalletAddress } from './wallet.js';
 
 /** Signal type discriminator */
-export type SignalType = 'LAUNCH' | 'MOMENTUM' | 'MIGRATION' | 'LIQUIDITY_PHASE' | 'WASH_TRADE' | 'BUNDLE';
+export type SignalType = 'LAUNCH' | 'MOMENTUM' | 'MIGRATION' | 'LIQUIDITY_PHASE' | 'WASH_TRADE' | 'BUNDLE' | 'CABAL' | 'DAY_PHASE' | 'DEX_PAID' | 'CONCENTRATION' | 'SMART_MONEY' | 'REVOKE';
 
 /** Unique signal identifier */
 export type SignalId = string;
@@ -37,6 +37,10 @@ export interface MomentumSignal extends BaseSignal {
   readonly volumeSol: bigint;
   /** Number of unique slots with buys in the window (for bundle detection). */
   readonly uniqueSlotCount?: number;
+  /** Number of unique wallets with buys in the window. */
+  readonly uniqueWalletCount?: number;
+  /** Number of sells in the window (for sell pressure detection). */
+  readonly sellCount?: number;
 }
 
 /** Token graduated / migrated to Raydium */
@@ -71,6 +75,57 @@ export interface BundleSignal extends BaseSignal {
   readonly windowMs: number;
 }
 
+/** Cabal / coordinated wallet cluster detected */
+export interface CabalSignal extends BaseSignal {
+  readonly type: 'CABAL';
+  readonly cabalScore: number;
+  readonly clusterSize: number;
+  readonly wallets: readonly WalletAddress[];
+}
+
+/** Day phase analysis result */
+export interface DayPhaseSignal extends BaseSignal {
+  readonly type: 'DAY_PHASE';
+  readonly fdv: number;
+  readonly athDipPct: number;
+  readonly sidewaysDays: number;
+  readonly holderTrend: 'growing' | 'stable' | 'declining';
+}
+
+/** DEX paid listing detected (late entry signal) */
+export interface DexPaidSignal extends BaseSignal {
+  readonly type: 'DEX_PAID';
+  readonly isPaid: boolean;
+  readonly isLate: boolean;
+  readonly gapMinutes: number;
+  readonly paidTimestamp: number | null;
+}
+
+/** Holder concentration warning */
+export interface ConcentrationSignal extends BaseSignal {
+  readonly type: 'CONCENTRATION';
+  readonly effectiveConcentration: number;
+  readonly clusterCount: number;
+  readonly topClusterWallets: readonly string[];
+}
+
+/** Smart money wallet activity detected */
+export interface SmartMoneySignal extends BaseSignal {
+  readonly type: 'SMART_MONEY';
+  readonly smartWalletCount: number;
+  readonly smartMoneyScore: number;
+  readonly wallets: readonly string[];
+}
+
+/** Token authority revoke timing analysis */
+export interface RevokeSignal extends BaseSignal {
+  readonly type: 'REVOKE';
+  readonly revoked: boolean;
+  readonly revokeTimestamp: number | null;
+  readonly revokedAfterDump: boolean;
+  readonly isPositive: boolean;
+}
+
 /** Parsed token launch event (protocol-agnostic). Used by detectors. */
 export interface LaunchEvent {
   readonly mint: MintAddress;
@@ -84,4 +139,4 @@ export interface LaunchEvent {
 }
 
 /** Union of all signal types */
-export type Signal = LaunchSignal | MomentumSignal | MigrationSignal | LiquidityPhaseSignal | WashTradeSignal | BundleSignal;
+export type Signal = LaunchSignal | MomentumSignal | MigrationSignal | LiquidityPhaseSignal | WashTradeSignal | BundleSignal | CabalSignal | DayPhaseSignal | DexPaidSignal | ConcentrationSignal | SmartMoneySignal | RevokeSignal;

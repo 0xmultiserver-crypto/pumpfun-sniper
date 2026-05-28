@@ -59,6 +59,8 @@ export interface MaxExposureGuardConfig {
 
 export class MaxExposureGuard {
   private readonly maxPositions: number;
+  /** Exposed for synchronous re-checks in buy flow. */
+  get maxConcurrentPositions(): number { return this.maxPositions; }
   private readonly positionProvider: PositionProvider;
 
   constructor(positionProvider: PositionProvider, config?: MaxExposureGuardConfig) {

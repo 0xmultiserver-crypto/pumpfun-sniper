@@ -19,6 +19,7 @@ import {
   DEFAULT_MIN_SYMBOL_LENGTH,
   DEFAULT_MAX_SYMBOL_LENGTH,
   DEFAULT_METADATA_SCAM_PATTERNS,
+  DEFAULT_METADATA_STRUCTURAL_PATTERNS,
   DEFAULT_MAX_WALLET_CONCENTRATION_PCT,
   DEFAULT_WALLET_CONCENTRATION_TOP_N,
 } from '../core/constants/defaults.js';
@@ -72,6 +73,8 @@ export function evaluateLaunchProvenance(
   liquiditySane: boolean,
   creatorAddress: WalletAddress | null,
 ): boolean {
+  // Require at least one launch signal OR (liquidity sane AND creator exists).
+  // Pure fallback was too loose — this requires both conditions.
   return launchSignals.length > 0 || (liquiditySane && creatorAddress !== null);
 }
 
@@ -107,7 +110,8 @@ function checkMetadataFields(meta: { name: string; symbol: string; uri: string }
   const symbolOk = meta.symbol.length >= DEFAULT_MIN_SYMBOL_LENGTH && meta.symbol.length <= DEFAULT_MAX_SYMBOL_LENGTH;
   const uriOk = meta.uri.length > 0;
   const noScam = !DEFAULT_METADATA_SCAM_PATTERNS.some(p => p.test(meta.name) || p.test(meta.symbol));
-  const sane = nameOk && symbolOk && uriOk && noScam;
+  const noStructuralJunk = !DEFAULT_METADATA_STRUCTURAL_PATTERNS.some(p => p.test(meta.name) || p.test(meta.symbol));
+  const sane = nameOk && symbolOk && uriOk && noScam && noStructuralJunk;
   if (!sane) {
     logger.debug('Metadata sanity failed', { name: meta.name, symbol: meta.symbol, nameOk, symbolOk, uriOk, noScam });
   }

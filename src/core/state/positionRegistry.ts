@@ -49,6 +49,10 @@ export class PositionRegistry {
       timestamp: nowMs(),
     };
     this.transitions.push(transition);
+    // Cap transition history to prevent unbounded memory growth
+    if (this.transitions.length > 10_000) {
+      this.transitions.splice(0, this.transitions.length - 10_000);
+    }
 
     const updated: Position = {
       ...existing,

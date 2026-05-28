@@ -46,6 +46,7 @@ import { nowMs } from './core/utils/time.js';
 import { generateId } from './core/utils/serialization.js';
 import { WsManager } from './app/wsManager.js';
 import { restoreOpenPositionsFromDb, hasLiveTokenBalance } from './app/positionRecovery.js';
+import { PositionReconciler } from './app/positionReconciler.js';
 import { handleWsMessage } from './ingestion/wsMessageHandler.js';
 import { reclaimAllEmptyAccounts } from './app/execution/rentReclaimer.js';
 import type { TradeRecord } from './core/types/trade.js';
@@ -74,22 +75,12 @@ async function main(): Promise<void> {
   // Step 2: Wire strategy with data + execution providers
   logger.info('Wiring strategy...');
   const positionRegistry = new PositionRegistry();
-  const dataProvider = createDataProvider(container, positionRegistry);
   const executionDelegate = createExecutionDelegate(container, positionRegistry);
-  const strategy = new FilteredSniperStrategy(dataProvider, executionDelegate);
-  container.setStrategy(strategy);
+  // dataProvider + strategy created AFTER detectors (needs bundle/wash data)
+  let dataProvider!: ReturnType<typeof createDataProvider>;
+  let strategy!: FilteredSniperStrategy;
   const walletPublicKey = container.signer.getPublicKey();
-  const recoveryResult = await restoreOpenPositionsFromDb({
-    tradeRepository: container.tradeRepository,
-    positionRegistry,
-    monitorTrade: (tradeId) => strategy.monitorTrade(tradeId),
-    hasTokenBalance: (trade: TradeRecord) => hasLiveTokenBalance(container.connection, walletPublicKey, new PublicKey(trade.mint)),
-  });
-  logger.info('DB open-position recovery complete', {
-    restored: recoveryResult.restored,
-    skipped: recoveryResult.skipped,
-  });
-  logger.info('FilteredSniperStrategy wired');
+  // Position recovery moved to after strategy creation (see below)
 
   // Wire Risk Guards
   container.dailyLossGuard.onKill((state) => {
@@ -170,6 +161,23 @@ async function main(): Promise<void> {
     minTradeCount: 10,
   });
 
+  // Create dataProvider now that detectors exist (needs bundle + wash data)
+  dataProvider = createDataProvider(container, positionRegistry, { bundleDetector, washTradeDetector });
+  strategy = new FilteredSniperStrategy(dataProvider, executionDelegate);
+  container.setStrategy(strategy);
+
+  // Position recovery (AFTER strategy creation — needs strategy.monitorTrade)
+  const recoveryResult = await restoreOpenPositionsFromDb({
+    tradeRepository: container.tradeRepository,
+    positionRegistry,
+    monitorTrade: (tradeId: string, mint?: string) => strategy.monitorTrade(tradeId, mint),
+    hasTokenBalance: (trade: TradeRecord) => hasLiveTokenBalance(container.connection, walletPublicKey, new PublicKey(trade.mint)),
+  });
+  logger.info('DB open-position recovery complete', {
+    restored: recoveryResult.restored,
+    skipped: recoveryResult.skipped,
+  });
+
   // New analytics-only detectors (Phase 3.3–5.3)
   const dexPaidDetector = new DexPaidDetector();
   const rpcClient = container.rpcPool.getBest()!;
@@ -208,7 +216,7 @@ async function main(): Promise<void> {
   });
 
   momentumDetector.onSignal((signal) => {
-    logger.info('Momentum signal detected', { mint: signal.mint });
+    logger.debug('Momentum signal detected', { mint: signal.mint });
     const s = signal as import('./core/types/signal.js').MomentumSignal;
     void container.signalRepository.save({
       id: generateId('sig'), type: 'MOMENTUM' as const, mint: s.mint,
@@ -297,6 +305,7 @@ async function main(): Promise<void> {
   dispatcher.on('trade', (event) => {
     const isBuy = (event.data['isBuy'] as boolean) ?? true;
     const solAmount = typeof event.data['solAmount'] === 'bigint' ? event.data['solAmount'] as bigint : BigInt((event.data['solAmount'] as string) ?? '0');
+    const tokenAmount = typeof event.data['tokenAmount'] === 'bigint' ? event.data['tokenAmount'] as bigint : BigInt((event.data['tokenAmount'] as string) ?? '0');
     const slot = event.slot ?? 0;
     const timestamp = event.receivedAt;
     const wallet = (event.data[isBuy ? 'buyer' : 'seller'] as string) ?? undefined;
@@ -308,7 +317,7 @@ async function main(): Promise<void> {
 
     // Feed buy events to bundle detector
     if (isBuy && wallet) {
-      bundleDetector.handleBuy({ mint, wallet, tokenAmount: solAmount, slot, timestamp });
+      bundleDetector.handleBuy({ mint, wallet, tokenAmount, slot, timestamp });
     }
 
     // Feed all trade events to wash trade detector
@@ -392,6 +401,18 @@ async function main(): Promise<void> {
 
   // Step 5: Start strategy before opening WebSocket so early signals are not ignored.
   strategy.start();
+
+  // Step 5.5: Start position reconciler (syncs DB with wallet every 60s)
+  const reconciler = new PositionReconciler({
+    container,
+    connection: container.connection,
+    wallet: walletPublicKey,
+    positionRegistry,
+    tradeRepository: container.tradeRepository,
+    monitorTrade: (tradeId: string, mint?: string) => strategy.monitorTrade(tradeId, mint),
+    monitoredTrades: (strategy as any).monitoredTrades as Set<string>,
+  });
+  reconciler.start();
 
   // Step 6: Connect WebSocket (using WsManager with auto-reconnect)
   logger.info('Connecting to Helius WebSocket...');

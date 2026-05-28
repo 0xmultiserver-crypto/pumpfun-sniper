@@ -125,7 +125,7 @@ export class JupiterProvider implements IRoutingProvider {
         routeData: data,
       };
     } catch (err: unknown) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
+      if (err instanceof Error && err.name === 'AbortError') {
         logger.warn('Jupiter quote API timed out', {
           mint: params.mint,
           timeoutMs: this.timeoutMs,
@@ -146,7 +146,3 @@ export class JupiterProvider implements IRoutingProvider {
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
-
-export function createJupiterProvider(timeoutMs?: number): JupiterProvider {
-  return new JupiterProvider(timeoutMs);
-}

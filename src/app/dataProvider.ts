@@ -23,6 +23,8 @@ import {
   CREATOR_HISTORY_WINDOW_MS,
 } from '../strategies/filteredSniper/filteredSniperRules.js';
 import { computePositionSizeLamports } from './executionDelegate.js';
+import { getRealHolderCount } from './heliusHolderCount.js';
+import { getRealVolume1h } from './realVolumeFetcher.js';
 import {
   evaluateAuthority,
   evaluateLiquidity,
@@ -35,6 +37,58 @@ const logger = createLogger('main:dataProvider');
 
 /** In-memory highest price tracking per trade. */
 const highestPriceTracker = new Map<string, bigint>();
+
+/** Jupiter price cache per mint (price in SOL per raw token). Avoids hammering API every 1s poll. */
+const graduatedPriceCache = new Map<string, { priceLamports: bigint; fetchedAt: number }>();
+const JUPITER_PRICE_CACHE_TTL_MS = 5_000; // 5s cache for graduated token prices
+const JUPITER_PRICE_API = 'https://api.jup.ag/price/v2';
+const SOL_MINT = 'So11111111111111111111111111111111111111112';
+
+/**
+ * Fetch graduated token price from Jupiter Price API.
+ * Returns price in lamports per raw token unit (6 decimals).
+ * Cached for 5s to avoid hammering the API on every exit monitor poll.
+ */
+async function fetchGraduatedPriceLamports(mint: string): Promise<bigint | null> {
+  const cached = graduatedPriceCache.get(mint);
+  if (cached && nowMs() - cached.fetchedAt < JUPITER_PRICE_CACHE_TTL_MS) {
+    return cached.priceLamports;
+  }
+
+  try {
+    const url = `${JUPITER_PRICE_API}?ids=${mint}&vsToken=${SOL_MINT}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5_000);
+
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: { Accept: 'application/json' },
+    });
+    clearTimeout(timer);
+
+    if (!response.ok) return null;
+
+    const data = await response.json() as { data?: Record<string, { price?: number }> };
+    const priceSol = data.data?.[mint]?.price;
+
+    if (typeof priceSol !== 'number' || priceSol <= 0) return null;
+
+    // Jupiter returns price as SOL per 1 token (human-readable).
+    // 1 token = 10^6 raw units. We need lamports per raw unit.
+    // priceLamports = priceSol * 10^9 / 10^6 = priceSol * 10^3
+    const priceLamports = BigInt(Math.round(priceSol * 1_000));
+
+    graduatedPriceCache.set(mint, { priceLamports, fetchedAt: nowMs() });
+    logger.debug('Jupiter graduated price fetched', { mint, priceSol, priceLamports: priceLamports.toString() });
+    return priceLamports;
+  } catch (err: unknown) {
+    logger.warn('Jupiter graduated price fetch failed', {
+      mint,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return cached?.priceLamports ?? null;
+  }
+}
 
 // Metaplex Token Metadata PDA
 function deriveMetadataPDA(mint: PublicKey): PublicKey {
@@ -56,6 +110,7 @@ function deriveMetadataPDA(mint: PublicKey): PublicKey {
 export function createDataProvider(
   container: ServiceContainer,
   positionRegistry: PositionRegistry,
+  detectors?: { bundleDetector?: { getLatestBundlePct(mint: string): number | null; forceAnalyze(mint: string): number }; washTradeDetector?: { getLatestWashScore(mint: string): number | null; forceAnalyze(mint: string): number } },
 ): StrategyDataProvider {
   const conn = container.connection;
 
@@ -147,7 +202,7 @@ export function createDataProvider(
 
       // --- Check 10: Price impact of position size on bonding curve ---
       // Parse bonding curve data ONCE and reuse for both price impact and market cap
-      let parsedBC: { virtualSolReserves: bigint; virtualTokenReserves: bigint; complete: boolean } | null = null;
+      let parsedBC: { virtualSolReserves: bigint; virtualTokenReserves: bigint; realSolReserves: bigint; complete: boolean } | null = null;
       if (bondingCurveAccount?.data && bondingCurveAccount.data.length >= 49) {
         parsedBC = parseBondingCurveData(bondingCurveAccount.data);
       }
@@ -157,7 +212,8 @@ export function createDataProvider(
         try {
           const solPriceUsd = await container.solPriceOracle.getSolPriceUsd();
           const positionSizeLamports = computePositionSizeLamports(solPriceUsd);
-          priceImpactBps = Number((positionSizeLamports * 10000n) / (parsedBC.virtualSolReserves + positionSizeLamports));
+          // Use floating-point to avoid BigInt truncation to 0 for small positions
+          priceImpactBps = Number(positionSizeLamports * 10000n) / Number(parsedBC.virtualSolReserves + positionSizeLamports);
         } catch (err: unknown) {
           logger.warn('Failed to compute price impact — SOL price unavailable', {
             mint: mint.slice(0, 12),
@@ -197,7 +253,8 @@ export function createDataProvider(
           const totalSupplyRaw = BigInt(supply.value.amount);
           const marketCapLamports = pricePerTokenLamports * totalSupplyRaw;
           const solPriceUsd = await container.solPriceOracle.getSolPriceUsd();
-          marketCapUsd = Number(marketCapLamports) / 1e9 * solPriceUsd;
+          // Divide in BigInt first to avoid Number overflow (marketCapLamports can exceed 2^53)
+          marketCapUsd = Number(marketCapLamports / 10n ** 9n) * solPriceUsd;
         } catch (err: unknown) {
           logger.warn('Failed to calculate market cap', {
             mint: mint.slice(0, 12),
@@ -206,7 +263,7 @@ export function createDataProvider(
         }
       }
 
-      logger.info('Entry check data fetched', {
+      logger.debug('Entry check data fetched', {
         mint: mint.slice(0, 12),
         signalType: signal.type,
         launchDetected,
@@ -239,6 +296,23 @@ export function createDataProvider(
         volumeLamports,
         windowMs,
         priceImpactBps,
+        bundlePct: detectors?.bundleDetector?.forceAnalyze(mint as any) ?? null,
+        washTradeScore: detectors?.washTradeDetector?.forceAnalyze(mint) ?? null,
+        uniqueWallets: 'uniqueWalletCount' in signal ? (signal as any).uniqueWalletCount as number : undefined,
+        // Check 14: Sell pressure — now available from momentum signal
+        sellCountInWindow: 'sellCount' in signal ? (signal as any).sellCount as number : undefined,
+        // Check 15: Real SOL reserves in bonding curve
+        realSolReservesLamports: parsedBC?.realSolReserves ?? null,
+        // Check 16: Real holder count from Helius API (not just top 20)
+        holderCount: await getRealHolderCount(mint, container.heliusApiKey).catch(() => largestAccounts?.value?.length ?? null),
+        // Check 18: Real 1h volume in USD from DexScreener (not momentum window)
+        volumeUsd: await getRealVolume1h(mint).catch(() => null)
+          ?? await (async () => {
+            try {
+              const solPrice = await container.solPriceOracle.getSolPriceUsd();
+              return Number(volumeLamports) / 1e9 * solPrice || undefined;
+            } catch { return undefined; }
+          })(),
         secondsSinceLaunch: secondsSinceLaunch ?? undefined,
         marketCapUsd,
       };
@@ -247,18 +321,36 @@ export function createDataProvider(
     async getPositionData(tradeId: string): Promise<PositionData | null> {
       const pos = positionRegistry.get(tradeId);
       if (!pos) {
-        // Clean up highest price tracker for exited positions to prevent memory leak
+        // Clean up price trackers for exited positions to prevent memory leak
         highestPriceTracker.delete(tradeId);
         return null;
       }
 
-      // Fetch current price from bonding curve
+      // Fetch current price from bonding curve (or Jupiter if graduated)
       const mintPk = new PublicKey(pos.mint);
       const bcPDA = deriveBondingCurvePDA(mintPk);
-      const bcAccount = await conn.getAccountInfo(bcPDA);
+
+      // Track highest price for trailing stop (moved up — needed by fallback)
+      const posTradeId = pos.tradeId ?? pos.id;
+      const prevHighest = highestPriceTracker.get(posTradeId) ?? 0n;
 
       let currentPriceLamports = 0n;
       let graduated = false;
+      
+
+      // Fetch bonding curve account with error handling (RPC can fail)
+      let bcAccount = null;
+      let rpcFailed = false;
+      try {
+        bcAccount = await conn.getAccountInfo(bcPDA);
+      } catch (rpcErr: unknown) {
+        rpcFailed = true;
+        logger.warn('RPC getAccountInfo failed — using prevHighest fallback', {
+          mint: pos.mint,
+          error: rpcErr instanceof Error ? rpcErr.message : String(rpcErr),
+        });
+      }
+
       if (bcAccount?.data && bcAccount.data.length >= 49) {
         const parsed = parseBondingCurveData(bcAccount.data);
         if (parsed) {
@@ -266,12 +358,67 @@ export function createDataProvider(
           if (!graduated && parsed.virtualTokenReserves > 0n) {
             currentPriceLamports = (parsed.virtualSolReserves * 10n ** 9n) / parsed.virtualTokenReserves;
           }
+        } else {
+          // Parse failed — bonding curve data is corrupt or format changed.
+          // Use prevHighest to avoid false STOP_LOSS at -100%.
+          if (prevHighest > 0n) {
+            currentPriceLamports = prevHighest;
+            logger.warn('Bonding curve parse failed — using prevHighest', {
+              mint: pos.mint,
+              dataLength: bcAccount.data.length,
+              fallbackPrice: prevHighest.toString(),
+            });
+          }
+        }
+      } else if (!bcAccount) {
+        if (rpcFailed) {
+          // RPC failure (transient) — safe to use prevHighest
+          if (prevHighest > 0n) {
+            currentPriceLamports = prevHighest;
+            logger.warn('Bonding curve RPC failed — using prevHighest', {
+              mint: pos.mint,
+              fallbackPrice: prevHighest.toString(),
+            });
+          }
+        } else {
+          // RPC succeeded but account is null → bonding curve deleted.
+          // This is a strong rug pull signal. Do NOT use prevHighest —
+          // let price stay at 0 so stop-loss triggers.
+          logger.error('Bonding curve account GONE (rug pull?) — NOT using prevHighest fallback', {
+            mint: pos.mint,
+            prevHighest: prevHighest.toString(),
+          });
         }
       }
 
-      // Track highest price for trailing stop
-      const posTradeId = pos.tradeId ?? pos.id;
-      const prevHighest = highestPriceTracker.get(posTradeId) ?? 0n;
+      // Graduated: bonding curve drained → fetch real price from Jupiter/Raydium
+      if (graduated) {
+        const jupiterPrice = await fetchGraduatedPriceLamports(pos.mint);
+        if (jupiterPrice !== null && jupiterPrice > 0n) {
+          currentPriceLamports = jupiterPrice;
+        } else if (prevHighest > 0n) {
+          // Jupiter fetch failed — keep using last known good price so trailing
+          // doesn't get a stale 0 and trigger false stop loss
+          currentPriceLamports = prevHighest;
+          logger.warn('Jupiter price unavailable for graduated token, using last known price', {
+            mint: pos.mint,
+            fallbackPrice: prevHighest.toString(),
+          });
+        }
+      }
+
+      // Safety: if currentPrice is STILL 0 but we have a previous highest,
+      // use it. A real price crash to exactly 0 is extremely rare (rug pull
+      // still has some residual value). Better to use stale price than trigger
+      // a false -100% STOP_LOSS.
+      if (currentPriceLamports === 0n && prevHighest > 0n) {
+        currentPriceLamports = prevHighest;
+        logger.warn('Price resolved to 0 but prevHighest exists — using fallback', {
+          mint: pos.mint,
+          fallbackPrice: prevHighest.toString(),
+        });
+      }
+
       const highestPriceLamports = currentPriceLamports > prevHighest ? currentPriceLamports : prevHighest;
       if (highestPriceLamports > prevHighest) {
         highestPriceTracker.set(posTradeId, highestPriceLamports);
@@ -291,6 +438,10 @@ export function createDataProvider(
 
     getActivePositionCount(): number {
       return positionRegistry.getActiveCount();
+    },
+
+    isTokenBlacklisted(mint: string): boolean {
+      return container.tokenBlacklist.isBlacklisted(mint);
     },
   };
 }

@@ -1,22 +1,20 @@
 /**
- * Ingestion metrics — stub (no-op).
- *
- * The full metrics subsystem was removed as dead code.
- * These stubs keep call sites compiling without side effects.
- * Replace with real metrics (Prometheus, etc.) when needed.
+ * Ingestion metrics — thin wrappers over Prometheus counters.
  */
+
+import { eventsTotal } from './prometheus.js';
 
 /** Record a successful RPC call. */
 export function recordRpcCall(_method: string, _latencyMs: number): void {
-  // no-op
+  // No dedicated RPC counter yet — add when RPC latency tracking is needed.
 }
 
 /** Record a failed RPC call. */
 export function recordRpcError(_method: string, _error: string): void {
-  // no-op
+  // No dedicated RPC error counter yet — add when RPC reliability tracking is needed.
 }
 
 /** Record an event processed by the normalizer. */
-export function recordEventProcessed(_eventType: string): void {
-  // no-op
+export function recordEventProcessed(eventType: string): void {
+  eventsTotal.inc({ type: eventType });
 }

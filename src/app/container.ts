@@ -19,6 +19,7 @@ import { Connection, Keypair } from '@solana/web3.js';
 // Core
 // ---------------------------------------------------------------------------
 import { createLogger } from '../telemetry/logging/logger.js';
+import { nowMs } from '../core/utils/time.js';
 // Config env loading is in bootstrap.ts, not here
 import {
   DEFAULT_HELIUS_RPC_BASE,
@@ -55,7 +56,6 @@ import { EmergencyKillSwitch } from '../risk/controls/emergencyKillSwitch.js';
 import { CooldownManager } from '../risk/controls/cooldownManager.js';
 import { DailyLossGuard } from '../risk/controls/dailyLossGuard.js';
 import { TradeThrottle } from '../risk/controls/tradeThrottle.js';
-import { AntiRugMonitor } from '../risk/controls/antiRug.js';
 import { MaxExposureGuard } from '../risk/exposure/maxExposureGuard.js';
 import type { PositionProvider } from '../risk/exposure/maxExposureGuard.js';
 import { CreatorBlacklist } from '../risk/blacklist/creatorBlacklist.js';
@@ -67,7 +67,6 @@ import { SolPriceOracle } from './solPriceOracle.js';
 // Execution
 // ---------------------------------------------------------------------------
 import { TxBuilder } from '../execution/tx/txBuilder.js';
-import { CUEstimator } from '../execution/tx/cuEstimator.js';
 import { PumpfunVenue } from '../execution/venues/pumpfunVenue.js';
 import { JupiterVenue } from '../execution/venues/jupiterVenue.js';
 import { RpcSender } from '../execution/sender/rpcSender.js';
@@ -131,10 +130,15 @@ export class ServiceContainer {
     return this.config.wsUrl;
   }
 
+  get heliusApiKey(): string {
+    return this.config.heliusApiKey;
+  }
+
   // Cached instances (lazy singletons)
   private _rpcPool: RpcPool | null = null;
   private _rpcFailover: RpcFailover | null = null;
   private _connection: Connection | null = null;
+  private _connectionCreatedAt = 0;
   private _pgPool: Pool | null = null;
   private _redis: Redis | null = null;
   private _tradeRepository: TradeRepository | null = null;
@@ -151,14 +155,12 @@ export class ServiceContainer {
   private _maxExposureGuard: MaxExposureGuard | null = null;
   private _creatorBlacklist: CreatorBlacklist | null = null;
   private _tokenBlacklist: TokenBlacklist | null = null;
-  private _antiRugMonitor: AntiRugMonitor | null = null;
   private _txBuilder: TxBuilder | null = null;
   private _rpcSender: RpcSender | null = null;
   private _sendCoordinator: SendCoordinator | null = null;
   private _pumpfunVenue: PumpfunVenue | null = null;
   private _jupiterVenue: JupiterVenue | null = null;
   private _solPriceOracle: SolPriceOracle | null = null;
-  private _cuEstimator: CUEstimator | null = null;
 
   constructor(config: AppConfig) {
     this.config = config;
@@ -221,12 +223,14 @@ export class ServiceContainer {
    * This connection is for things that need a raw Connection (subscriptions, etc.)
    */
   get connection(): Connection {
-    if (this._connection === null) {
-      // getBestClient() returns the healthiest RPC endpoint.
-      // Lazy: only called when something actually needs a raw Connection.
-      // If no healthy endpoint exists, getBestClient() throws — callers must handle.
+    // Refresh cached connection every 60s so failover to a healthy endpoint
+    // actually takes effect. Without TTL, the cached Connection never changes
+    // even if the underlying endpoint goes down.
+    const CONNECTION_TTL_MS = 60_000;
+    if (this._connection === null || (nowMs() - this._connectionCreatedAt) > CONNECTION_TTL_MS) {
       const bestClient = this.rpcFailover.getBestClient();
       this._connection = bestClient.raw;
+      this._connectionCreatedAt = nowMs();
     }
     return this._connection;
   }
@@ -418,20 +422,6 @@ export class ServiceContainer {
       this._solPriceOracle = new SolPriceOracle();
     }
     return this._solPriceOracle;
-  }
-
-  get antiRugMonitor(): AntiRugMonitor {
-    if (this._antiRugMonitor === null) {
-      this._antiRugMonitor = new AntiRugMonitor(this.connection);
-    }
-    return this._antiRugMonitor;
-  }
-
-  get cuEstimator(): CUEstimator {
-    if (this._cuEstimator === null) {
-      this._cuEstimator = new CUEstimator();
-    }
-    return this._cuEstimator;
   }
 
   // -----------------------------------------------------------------------

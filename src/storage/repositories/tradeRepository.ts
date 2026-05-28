@@ -143,12 +143,29 @@ export class TradeRepository implements IRepository<TradeRecord, TradeId> {
         WHERE b.side = 'BUY'
           AND b.status = 'CONFIRMED'
           AND b.amount_tokens > 0
-          AND NOT EXISTS (
-            SELECT 1
-            FROM trades s
-            WHERE s.side = 'SELL'
-              AND s.status = 'CONFIRMED'
-              AND s.id = ('sell-' || b.id)
+          AND b.confirmed_at > NOW() - INTERVAL '1 hour'
+          AND (
+            -- No matching sell at all
+            NOT EXISTS (
+              SELECT 1
+              FROM trades s
+              WHERE s.side = 'SELL'
+                AND s.status = 'CONFIRMED'
+                AND s.mint = b.mint
+                AND s.id = ('sell-' || b.id)
+            )
+            OR
+            -- Matching sell exists but is PARTIAL (sell tokens < buy tokens)
+            -- This handles SCALE-OUT where bot sold 50% but still holds remainder
+            EXISTS (
+              SELECT 1
+              FROM trades s
+              WHERE s.side = 'SELL'
+                AND s.status = 'CONFIRMED'
+                AND s.mint = b.mint
+                AND s.id = ('sell-' || b.id)
+                AND s.amount_tokens < b.amount_tokens
+            )
           )
         ORDER BY COALESCE(b.confirmed_at, b.submitted_at) ASC`,
       values: [],

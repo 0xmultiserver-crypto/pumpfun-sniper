@@ -50,7 +50,7 @@ export type MarketCapTier = 'MICRO' | 'SMALL' | 'MID' | 'LARGE';
  * - MID: $1M-$10M (swing trade)
  * - LARGE: >$10M (established, CEX play)
  */
-export function getMarketCapTier(marketCapUsd: number | null | undefined): MarketCapTier {
+function getMarketCapTier(marketCapUsd: number | null | undefined): MarketCapTier {
   if (marketCapUsd === null || marketCapUsd === undefined) return 'MICRO'; // default to conservative
   if (marketCapUsd < 100_000) return 'MICRO';
   if (marketCapUsd < 1_000_000) return 'SMALL';

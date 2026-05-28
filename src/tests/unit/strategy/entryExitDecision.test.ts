@@ -15,6 +15,7 @@ import {
   TIMEOUT_SECONDS,
   TIMEOUT_MS,
   MOMENTUM_MIN_BUYS,
+  MOMENTUM_MIN_VOLUME_LAMPORTS,
   MOMENTUM_WINDOW_MS,
   MAX_PRICE_IMPACT_BPS,
 } from '@strategies/filteredSniper/filteredSniperRules.js';
@@ -41,9 +42,16 @@ function makeEntryData(overrides?: Partial<EntryCheckData>): EntryCheckData {
     liquiditySane: true,
     walletConcentrationAcceptable: true,
     buyCountInWindow: MOMENTUM_MIN_BUYS,
-    volumeLamports: 1_000_000_000n,
+    volumeLamports: MOMENTUM_MIN_VOLUME_LAMPORTS,
     windowMs: MOMENTUM_WINDOW_MS,
     priceImpactBps: null,
+    bundlePct: 10,
+    washTradeScore: 20,
+    uniqueWallets: 15,
+    sellCountInWindow: 3,
+    realSolReservesLamports: 1_000_000_000n,
+    holderCount: 50,
+    marketCapUsd: 50000,
     ...overrides,
   };
 }
@@ -69,8 +77,8 @@ function makePositionData(overrides?: Partial<PositionData>): PositionData {
 // ---------------------------------------------------------------------------
 
 describe('evaluateEntry', () => {
-  it('ENTRY_CHECK_COUNT is 10', () => {
-    expect(ENTRY_CHECK_COUNT).toBe(10);
+  it('ENTRY_CHECK_COUNT is 18', () => {
+    expect(ENTRY_CHECK_COUNT).toBe(18);
   });
 
   it('allows entry when all checks pass', () => {
@@ -78,7 +86,7 @@ describe('evaluateEntry', () => {
     const result = evaluateEntry(data);
     expect(result.allowed).toBe(true);
     expect(result.failedCount).toBe(0);
-    expect(result.passedCount).toBe(10);
+    expect(result.passedCount).toBe(18);
   });
 
   it('rejects when mintAuthorityRevoked is false', () => {
@@ -106,10 +114,10 @@ describe('evaluateEntry', () => {
     expect(result.allowed).toBe(false);
   });
 
-  it('always returns exactly 10 checks', () => {
+  it('always returns exactly 18 checks', () => {
     const data = makeEntryData();
     const result = evaluateEntry(data);
-    expect(result.checks.length).toBe(10);
+    expect(result.checks.length).toBe(18)
   });
 
   it('firstFailure is null when all pass', () => {
@@ -210,40 +218,46 @@ describe('evaluateExit', () => {
     expect(result.reason).toBe('STOP_LOSS');
   });
 
-  it('GRADUATED exits immediately with pnlPercent=0 (not -100%)', () => {
-    // Simulates: token graduated, bonding curve reserves drained → price=0
-    // Without graduated flag this would trigger STOP_LOSS at -100%
+  it('GRADUATED with real price uses normal exit logic (trailing/SL/TP)', () => {
+    // Graduated tokens now use Jupiter price, not bonding curve.
+    // Exit decision evaluates trailing/SL/TP normally.
     const data = makePositionData({
       entryPriceLamports: 1_000_000_000n,
-      currentPriceLamports: 0n, // bonding curve drained after graduation
+      currentPriceLamports: 2_000_000_000n, // +100% PnL (from Jupiter price)
       graduated: true,
     });
     const result = evaluateExit(data);
+    // At +100%, SCALE_OUT fires first (tier 0 = +100% sell 50%)
     expect(result.shouldExit).toBe(true);
-    expect(result.reason).toBe('GRADUATED');
-    expect(result.pnlPercent).toBe(0); // NOT -100%
+    expect(result.reason).toBe('SCALE_OUT');
+    expect(result.sellPct).toBe(50);
   });
 
-  it('GRADUATED beats STOP_LOSS (graduated detected before PnL calc)', () => {
+  it('GRADUATED does NOT auto-sell — trailing/SL/TP handle it', () => {
+    // With real Jupiter price, graduated token with +20% PnL is held
+    // (below SCALE_OUT +100%, below trailing activation +70%)
     const data = makePositionData({
       entryPriceLamports: 1_000_000_000n,
-      currentPriceLamports: 0n, // would be -100% PnL
+      currentPriceLamports: 1_200_000_000n, // +20% PnL
       graduated: true,
     });
     const result = evaluateExit(data);
-    expect(result.reason).toBe('GRADUATED');
-    expect(result.reason).not.toBe('STOP_LOSS');
+    expect(result.shouldExit).toBe(false);
+    expect(result.reason).toBeNull();
   });
 
-  it('GRADUATED beats KILL_SWITCH (graduated check before kill switch)', () => {
+  it('GRADUATED with price=0 triggers STOP_LOSS (Jupiter price unavailable)', () => {
+    // Edge case: graduated but Jupiter price fetch failed and no prev highest
+    // → price=0 → PnL = -100% → STOP_LOSS
     const data = makePositionData({
       entryPriceLamports: 1_000_000_000n,
       currentPriceLamports: 0n,
       graduated: true,
-      killSwitchActive: true,
+      highestPriceLamports: 0n,
     });
     const result = evaluateExit(data);
-    expect(result.reason).toBe('GRADUATED');
+    expect(result.shouldExit).toBe(true);
+    expect(result.reason).toBe('STOP_LOSS');
   });
 
   it('non-graduated token with price=0 still triggers STOP_LOSS', () => {
@@ -258,18 +272,18 @@ describe('evaluateExit', () => {
     expect(result.reason).toBe('STOP_LOSS');
   });
 
-  it('TRAILING_STOP triggers when price drops 25% from highest', () => {
-    // Entry=100, highest=200 (+100%), current=148 (-26% from high)
-    // Trailing 25% → stop at 200*0.75 = 150. 148 < 150 → trigger
+  it('TRAILING_STOP triggers when price drops 50% from highest', () => {
+    // Entry=100, highest=200 (+100% → activates trailing), current=95 (-52.5% from high)
+    // Trailing 50% → stop at 200*0.50 = 100. 95 < 100 → trigger
     const data = makePositionData({
       entryPriceLamports: 1_000_000_000n,
       highestPriceLamports: 2_000_000_000n,
-      currentPriceLamports: 1_480_000_000n,
+      currentPriceLamports: 950_000_000n,
     });
     const result = evaluateExit(data);
     expect(result.shouldExit).toBe(true);
     expect(result.reason).toBe('TRAILING_STOP');
-    expect(result.pnlPercent).toBeCloseTo(48, 0); // +48% from entry
+    expect(result.pnlPercent).toBeCloseTo(-5, 0); // -5% from entry
   });
 
   it('TRAILING_STOP does NOT trigger when price within trailing range', () => {
@@ -299,13 +313,13 @@ describe('evaluateExit', () => {
   });
 
   it('TRAILING_STOP beats STOP_LOSS when both could trigger', () => {
-    // Entry=100, highest=200, current=150 (-25% from high, +50% from entry)
-    // Trailing 10% → stop at 180. 150 < 180 → TRAILING_STOP
-    // SL at -30% → 70. 150 > 70 → SL does NOT trigger
+    // Entry=100, highest=200 (+100% → activates), current=90 (-55% from high, -10% from entry)
+    // Trailing 50% → stop at 100. 90 < 100 → TRAILING_STOP
+    // SL at -50% → 50. 90 > 50 → SL does NOT trigger
     const data = makePositionData({
       entryPriceLamports: 1_000_000_000n,
       highestPriceLamports: 2_000_000_000n,
-      currentPriceLamports: 1_500_000_000n,
+      currentPriceLamports: 900_000_000n,
     });
     const result = evaluateExit(data);
     expect(result.shouldExit).toBe(true);

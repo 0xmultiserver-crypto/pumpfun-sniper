@@ -98,7 +98,7 @@ export class MigrationSignalDetector implements IDetector {
       if (!event.mint) throw new Error('empty mint');
       new PublicKey(event.mint);
     } catch (_) {
-      logger.warn('Migration event ignored — missing/invalid mint', {
+      logger.debug('Migration event ignored — missing/invalid mint', {
         mint: event.mint,
         slot: event.slot,
         signature: event.signature,

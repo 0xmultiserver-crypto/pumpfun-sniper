@@ -33,7 +33,7 @@ export interface OfficialPumpfunBondingCurve {
   readonly quoteMint: PublicKey;
 }
 
-export interface PumpfunFeeAccounts {
+interface PumpfunFeeAccounts {
   readonly feeRecipient: PublicKey;
   readonly buybackFeeRecipient: PublicKey;
 }
@@ -69,7 +69,7 @@ export function buildOfficialPumpfunBondingCurve(
   };
 }
 
-export function selectPumpfunFeeAccounts(global: any, mayhemMode = false): PumpfunFeeAccounts {
+function selectPumpfunFeeAccounts(global: any, mayhemMode = false): PumpfunFeeAccounts {
   const recipients = mayhemMode
     ? [global.reservedFeeRecipient, ...(global.reservedFeeRecipients ?? [])]
     : [global.feeRecipient, ...(global.feeRecipients ?? [])];

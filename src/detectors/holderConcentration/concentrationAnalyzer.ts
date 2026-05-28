@@ -13,6 +13,7 @@
 
 import type { MintAddress } from '../../core/types/token.js';
 import type { IDetector, SignalHandler } from '../../core/interfaces/detector.js';
+import type { ConcentrationSignal } from '../../core/types/signal.js';
 import { UnionFind } from '../../core/utils/unionFind.js';
 import { createLogger } from '../../telemetry/logging/logger.js';
 import { nowMs } from '../../core/utils/time.js';
@@ -96,6 +97,7 @@ export class ConcentrationAnalyzer implements IDetector {
   readonly name = 'concentration-analyzer';
 
   private readonly handlers: SignalHandler[] = [];
+  private signalCounter = 0;
 
   private readonly maxConcentrationPct: number;
   private readonly maxFundingSourceAgeMs: number;
@@ -156,6 +158,19 @@ export class ConcentrationAnalyzer implements IDetector {
 
   onSignal(handler: SignalHandler): void {
     this.handlers.push(handler);
+  }
+
+  private emit(signal: ConcentrationSignal): void {
+    for (const handler of this.handlers) {
+      try {
+        handler(signal);
+      } catch (err: unknown) {
+        logger.error('Signal handler threw', {
+          signalId: signal.id,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -237,6 +252,19 @@ export class ConcentrationAnalyzer implements IDetector {
 
     if (isConcentrated) {
       concentrationRejectionsTotal.inc();
+
+      this.signalCounter += 1;
+      this.emit({
+        id: `concentration-${this.signalCounter}-${nowMs()}`,
+        type: 'CONCENTRATION',
+        mint,
+        timestamp: nowMs(),
+        slot: 0,
+        effectiveConcentration,
+        clusterCount: clusters.length,
+        topClusterWallets: clusters[0]?.wallets ?? [],
+      });
+
       logger.warn('Token REJECTED — high effective concentration', {
         mint: mint.slice(0, 12),
         effectiveConcentration: effectiveConcentration.toFixed(2),
@@ -273,24 +301,40 @@ export class ConcentrationAnalyzer implements IDetector {
     // Collect all wallets from holders
     const holderWallets = new Set(holders.map((h) => h.wallet));
 
-    // For each holder wallet, check its funding source
-    // If two holder wallets share the same funding source, union them
-    const sourceToHolderWallets = new Map<string, string[]>();
+    // For each holder wallet, find its ROOT funding source by walking the
+    // funding chain transitively. This catches multi-hop funding:
+    //   source X → wallet A → wallet C
+    // Both A and C will be grouped under root X.
+    const rootSourceMap = new Map<string, string>(); // wallet → root source
+
+    const findRootSource = (wallet: string, visited: Set<string>): string => {
+      if (visited.has(wallet)) return wallet; // cycle protection
+      visited.add(wallet);
+      const source = this.fundingSources.get(wallet);
+      if (source === undefined || source === wallet) return wallet;
+      return findRootSource(source, visited);
+    };
 
     for (const holder of holders) {
-      const source = this.fundingSources.get(holder.wallet);
-      if (source !== undefined) {
-        const existing = sourceToHolderWallets.get(source);
-        if (existing !== undefined) {
-          existing.push(holder.wallet);
-        } else {
-          sourceToHolderWallets.set(source, [holder.wallet]);
-        }
+      const root = findRootSource(holder.wallet, new Set());
+      if (root !== holder.wallet) {
+        rootSourceMap.set(holder.wallet, root);
       }
     }
 
-    // Union wallets that share the same funding source
-    for (const [, wallets] of sourceToHolderWallets) {
+    // Group wallets by their root funding source
+    const rootToWallets = new Map<string, string[]>();
+    for (const [wallet, root] of rootSourceMap) {
+      const existing = rootToWallets.get(root);
+      if (existing !== undefined) {
+        existing.push(wallet);
+      } else {
+        rootToWallets.set(root, [wallet]);
+      }
+    }
+
+    // Union wallets that share the same root funding source
+    for (const [, wallets] of rootToWallets) {
       if (wallets.length > 1) {
         const first = wallets[0]!;
         for (let i = 1; i < wallets.length; i++) {
@@ -299,12 +343,12 @@ export class ConcentrationAnalyzer implements IDetector {
       }
     }
 
-    // Also check if the funding source itself is a holder
-    for (const source of sourceToHolderWallets.keys()) {
-      if (holderWallets.has(source)) {
-        const wallets = sourceToHolderWallets.get(source);
+    // Also union the root source itself if it's a holder
+    for (const root of rootToWallets.keys()) {
+      if (holderWallets.has(root)) {
+        const wallets = rootToWallets.get(root);
         if (wallets !== undefined && wallets.length > 0) {
-          uf.union(source, wallets[0]!);
+          uf.union(root, wallets[0]!);
         }
       }
     }

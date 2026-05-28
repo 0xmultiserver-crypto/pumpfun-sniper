@@ -56,7 +56,7 @@ export const createLogger = (module: string, level?: LogLevel): Logger => {
   const makeMethod = (lvl: LogLevel): LogMethod => {
     return (message: string, context?: Readonly<Record<string, unknown>>): void => {
       if (context !== undefined) {
-        pinoInstance[lvl]({ ...context, module }, message);
+        pinoInstance[lvl](context, message);
       } else {
         pinoInstance[lvl]({ module }, message);
       }
@@ -72,6 +72,3 @@ export const createLogger = (module: string, level?: LogLevel): Logger => {
     fatal: makeMethod('fatal'),
   });
 };
-
-/** Default root logger instance for convenience imports. */
-export const rootLogger: Logger = createLogger('root');

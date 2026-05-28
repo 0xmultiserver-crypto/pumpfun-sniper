@@ -7,7 +7,6 @@
 
 import { PublicKey } from '@solana/web3.js';
 import type { LaunchEvent as PumpfunLaunchEvent } from '../../../core/types/signal.js';
-export type { PumpfunLaunchEvent };
 import { createLogger } from '../../../telemetry/logging/logger.js';
 import {
   PROGRAM_DATA_PREFIX,

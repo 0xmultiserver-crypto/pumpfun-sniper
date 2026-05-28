@@ -137,12 +137,12 @@ describe('buildComputeBudgetInstructions', () => {
 describe('default compute budgets', () => {
   it('Pump.fun default: 200k CU, 150k micro-lamports', () => {
     expect(DEFAULT_PUMPFUN_COMPUTE_BUDGET.computeUnitLimit).toBe(200_000);
-    expect(DEFAULT_PUMPFUN_COMPUTE_BUDGET.computeUnitPrice).toBe(150_000n);
+    expect(DEFAULT_PUMPFUN_COMPUTE_BUDGET.computeUnitPrice).toBe(200_000n);
   });
 
   it('Jupiter default: 400k CU, 150k micro-lamports', () => {
     expect(DEFAULT_JUPITER_COMPUTE_BUDGET.computeUnitLimit).toBe(400_000);
-    expect(DEFAULT_JUPITER_COMPUTE_BUDGET.computeUnitPrice).toBe(150_000n);
+    expect(DEFAULT_JUPITER_COMPUTE_BUDGET.computeUnitPrice).toBe(200_000n);
   });
 
   it('Jupiter CU > Pump.fun CU (Jupiter needs more)', () => {

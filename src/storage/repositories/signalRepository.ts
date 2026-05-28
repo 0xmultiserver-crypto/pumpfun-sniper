@@ -10,6 +10,12 @@ import type {
   LiquidityPhaseSignal,
   WashTradeSignal,
   BundleSignal,
+  CabalSignal,
+  DayPhaseSignal,
+  DexPaidSignal,
+  ConcentrationSignal,
+  SmartMoneySignal,
+  RevokeSignal,
 } from '../../core/types/signal.js';
 import type { WalletAddress } from '../../core/types/wallet.js';
 
@@ -51,6 +57,18 @@ function reconstructSignal(row: SignalRow): Signal {
       return { ...base, ...data } as WashTradeSignal;
     case 'BUNDLE':
       return { ...base, ...data } as BundleSignal;
+    case 'CABAL':
+      return { ...base, ...data } as CabalSignal;
+    case 'DAY_PHASE':
+      return { ...base, ...data } as DayPhaseSignal;
+    case 'DEX_PAID':
+      return { ...base, ...data } as DexPaidSignal;
+    case 'CONCENTRATION':
+      return { ...base, ...data } as ConcentrationSignal;
+    case 'SMART_MONEY':
+      return { ...base, ...data } as SmartMoneySignal;
+    case 'REVOKE':
+      return { ...base, ...data } as RevokeSignal;
     default: {
       const _exhaustive: never = base.type;
       throw new Error(`Unknown signal type: ${_exhaustive as string}`);

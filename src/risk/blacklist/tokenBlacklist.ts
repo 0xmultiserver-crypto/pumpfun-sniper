@@ -8,6 +8,7 @@
  */
 
 import type { MintAddress } from '../../core/types/token.js';
+import { BoundedMap } from '../../core/utils/boundedMap.js';
 import { nowMs } from '../../core/utils/time.js';
 import { createLogger } from '../../telemetry/logging/logger.js';
 
@@ -35,11 +36,15 @@ export interface TokenBlacklistConfig {
 // ---------------------------------------------------------------------------
 
 export class TokenBlacklist {
-  private readonly entries = new Map<MintAddress, TokenBlacklistEntry>();
-  private readonly maxEntries: number;
+  private readonly entries: BoundedMap<MintAddress, TokenBlacklistEntry>;
 
   constructor(config?: TokenBlacklistConfig) {
-    this.maxEntries = config?.maxEntries ?? 5_000;
+    const maxEntries = config?.maxEntries ?? 5_000;
+
+    // Simple oldest-first eviction (no preference predicate needed)
+    this.entries = new BoundedMap<MintAddress, TokenBlacklistEntry>({
+      maxSize: maxEntries,
+    });
   }
 
   /**
@@ -55,21 +60,7 @@ export class TokenBlacklist {
   add(mint: MintAddress, reason: string): void {
     if (this.entries.has(mint)) return;
 
-    if (this.entries.size >= this.maxEntries) {
-      // Evict oldest
-      let oldestMint: MintAddress | null = null;
-      let oldestTime = Infinity;
-      for (const [key, entry] of this.entries) {
-        if (entry.addedAt < oldestTime) {
-          oldestTime = entry.addedAt;
-          oldestMint = key;
-        }
-      }
-      if (oldestMint !== null) {
-        this.entries.delete(oldestMint);
-      }
-    }
-
+    // BoundedMap handles eviction (oldest first)
     this.entries.set(mint, {
       mint,
       reason,
@@ -108,7 +99,7 @@ export class TokenBlacklist {
    * Get all blacklisted tokens.
    */
   getAll(): readonly TokenBlacklistEntry[] {
-    return Array.from(this.entries.values());
+    return this.entries.toArray();
   }
 
   /**

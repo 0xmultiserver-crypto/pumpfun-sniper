@@ -184,6 +184,21 @@ export class AntiRugMonitor {
         currentSnapshot.set(account.address.toBase58(), BigInt(account.amount));
       }
 
+      // Fetch total supply BEFORE comparison so first poll can detect dumps
+      try {
+        const supply = await this.connection.getTokenSupply(
+          new PublicKey(mint),
+        );
+        if (supply?.value?.amount) {
+          state.lastTotalSupply = BigInt(supply.value.amount);
+        }
+      } catch (supplyErr: unknown) {
+        logger.debug('Failed to fetch token supply for anti-rug', {
+          mint,
+          error: supplyErr instanceof Error ? supplyErr.message : String(supplyErr),
+        });
+      }
+
       // If we have a previous snapshot, compare balances
       if (state.lastSnapshot.size > 0 && state.lastTotalSupply > 0n) {
         const dumpThreshold = (state.lastTotalSupply * BigInt(this.thresholdPct)) / 100n;
@@ -222,17 +237,6 @@ export class AntiRugMonitor {
 
       // Update snapshot for next poll
       state.lastSnapshot = currentSnapshot;
-
-      // Fetch total supply for threshold calculation
-      try {
-        const supply = await this.connection.getTokenSupply(
-          new PublicKey(mint),
-        );
-        state.lastTotalSupply = BigInt(supply.value.amount);
-      } catch {
-        // If supply fetch fails, keep the previous value
-        logger.debug('Failed to fetch token supply for anti-rug', { mint });
-      }
 
       logger.debug('Anti-rug poll completed (no dump detected)', {
         mint,

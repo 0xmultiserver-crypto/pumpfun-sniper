@@ -124,6 +124,29 @@ export class WashTradeDetector implements IDetector {
     this.handlers.push(handler);
   }
 
+  /**
+   * Get the latest wash trade score for a mint.
+   * Returns 0-100 (higher = more suspicious), or null if no data.
+   */
+  getLatestWashScore(mint: string): number | null {
+    const state = this.tokenStates.get(mint as MintAddress);
+    if (!state || state.trades.length < 5) return null;
+    const result = this.analyzeWashPattern(state.trades);
+    return result.score;
+  }
+
+  /**
+   * Force-analyze wash trade patterns for a mint.
+   * Returns 0-100 (higher = more suspicious), or 0 if no data.
+   * Unlike getLatestWashScore, this works with as few as 2 trades.
+   */
+  forceAnalyze(mint: string): number {
+    const state = this.tokenStates.get(mint as MintAddress);
+    if (!state || state.trades.length < 2) return 0;
+    const result = this.analyzeWashPattern(state.trades);
+    return result.score;
+  }
+
   // -------------------------------------------------------------------------
   // Public API — called from ingestion pipeline
   // -------------------------------------------------------------------------

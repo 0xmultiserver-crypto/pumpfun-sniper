@@ -29,7 +29,7 @@ export async function runRiskGuards(container: ServiceContainer): Promise<RiskGu
     return { allowed: false, reason: `Daily loss limit: $${state.dailyPnlUsd.toFixed(2)}` };
   }
 
-  // Guard 3: Cooldown after stop loss
+  // Guard 3: Cooldown after exit (all exits except SCALE_OUT)
   const cooldownCheck = container.cooldownManager.canTrade();
   if (!cooldownCheck.allowed) {
     return { allowed: false, reason: cooldownCheck.reason ?? 'Cooldown active' };

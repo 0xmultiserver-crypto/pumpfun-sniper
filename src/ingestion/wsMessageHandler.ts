@@ -13,6 +13,7 @@ import type { EventNormalizer } from './pipeline/eventNormalizer.js';
 import type { EventDispatcher } from './pipeline/eventDispatcher.js';
 import { nowMs } from '../core/utils/time.js';
 import { createLogger } from '../telemetry/logging/logger.js';
+import { PUMPFUN_PROGRAM_ID } from '../core/constants/programs.js';
 
 const logger = createLogger('ingestion:wsMessageHandler');
 
@@ -46,7 +47,8 @@ export function handleWsMessage(
 
     const decoded = decodeEventFromLogs(logs, slot, signature);
     if (!decoded) {
-      const hasPf = logs.some(l => l.includes('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'));
+      const pfId = PUMPFUN_PROGRAM_ID.toBase58();
+      const hasPf = logs.some(l => l.includes(pfId));
       if (hasPf) {
         logger.debug('Pump.fun logs not decoded', { logCount: logs.length, sample: logs.slice(0, 5) });
       }

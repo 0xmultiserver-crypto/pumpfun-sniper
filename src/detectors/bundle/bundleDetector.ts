@@ -110,7 +110,7 @@ export class BundleDetector implements IDetector {
   constructor(config?: BundleDetectorConfig) {
     this.windowMs = (config?.windowSeconds ?? 60) * 1000;
     this.maxBundlePct = config?.maxBundlePct ?? 30;
-    this.minBuyCount = config?.minBuyCount ?? 5;
+    this.minBuyCount = config?.minBuyCount ?? 2;
     this.cooldownMs = config?.cooldownMs ?? 120_000;
   }
 
@@ -151,6 +151,16 @@ export class BundleDetector implements IDetector {
     this.handlers.push(handler);
   }
 
+  /**
+   * Get the latest bundle percentage for a mint.
+   * Returns null if no data available.
+   */
+  getLatestBundlePct(mint: string): number | null {
+    const state = this.tokenStates.get(mint as MintAddress);
+    if (!state || state.buys.length < 3) return null;
+    return this.analyzeBundle(mint as MintAddress, state);
+  }
+
   // -------------------------------------------------------------------------
   // Public API — called from ingestion pipeline
   // -------------------------------------------------------------------------
@@ -161,8 +171,6 @@ export class BundleDetector implements IDetector {
    */
   handleBuy(event: BundleBuyEvent): void {
     if (!this.running) return;
-
-    const now = nowMs();
 
     let state = this.tokenStates.get(event.mint);
     if (state === undefined) {
@@ -189,8 +197,10 @@ export class BundleDetector implements IDetector {
     // If the window just closed (first buy outside window or enough time elapsed),
     // compute the bundle analysis
     if (!state.windowClosed) {
-      const elapsed = now - state.windowStart;
-      if (elapsed > this.windowMs || event.timestamp - state.windowStart > this.windowMs) {
+      // Use event-time only for window closure. Real-time check was removed
+      // because under processing delays, real-time could close the window
+      // before all early-window events arrived, causing understated bundle%.
+      if (event.timestamp - state.windowStart > this.windowMs) {
         state.windowClosed = true;
         this.analyzeBundle(event.mint, state);
       }
@@ -203,7 +213,7 @@ export class BundleDetector implements IDetector {
    */
   forceAnalyze(mint: MintAddress): number {
     const state = this.tokenStates.get(mint);
-    if (state === undefined || state.buys.length < this.minBuyCount) {
+    if (state === undefined || state.buys.length < 1) {
       return 0;
     }
 
@@ -305,7 +315,7 @@ export class BundleDetector implements IDetector {
       if (now - state.lastSignalAt >= this.cooldownMs) {
         state.lastSignalAt = now;
 
-        logger.warn(
+        logger.info(
           `Bundle detected: ${bestCluster.size} wallet(s) bought ${bundlePct.toFixed(1)}% supply in ${windowMs}ms`,
           {
             mint: mint.slice(0, 12),
@@ -432,7 +442,7 @@ export class BundleDetector implements IDetector {
       windowMs,
     };
 
-    logger.info('Bundle signal emitted', {
+    logger.debug('Bundle signal emitted', {
       signalId,
       mint,
       bundlePct: bundlePct.toFixed(2),

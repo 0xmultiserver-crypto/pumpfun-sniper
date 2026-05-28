@@ -25,6 +25,7 @@ import { LRUCache } from '../../core/utils/lruCache.js';
 import type { MintAddress } from '../../core/types/token.js';
 import type { WalletAddress } from '../../core/types/wallet.js';
 import type { IDetector, SignalHandler } from '../../core/interfaces/detector.js';
+import type { CabalSignal } from '../../core/types/signal.js';
 import { nowMs } from '../../core/utils/time.js';
 import { createLogger } from '../../telemetry/logging/logger.js';
 import { UnionFind } from '../../core/utils/unionFind.js';
@@ -125,6 +126,7 @@ export class CabalDetector implements IDetector {
   readonly name = 'cabal-detector';
 
   private readonly handlers: SignalHandler[] = [];
+  private signalCounter = 0;
 
   private readonly coOccurrenceWindowMs: number;
   private readonly minSharedTokens: number;
@@ -201,6 +203,19 @@ export class CabalDetector implements IDetector {
 
   onSignal(handler: SignalHandler): void {
     this.handlers.push(handler);
+  }
+
+  private emit(signal: CabalSignal): void {
+    for (const handler of this.handlers) {
+      try {
+        handler(signal);
+      } catch (err: unknown) {
+        logger.error('Signal handler threw', {
+          signalId: signal.id,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -312,6 +327,18 @@ export class CabalDetector implements IDetector {
       cabalDetectionsTotal.inc();
 
       const cabalWallets = activeWallets.filter((w) => bestCluster!.wallets.has(w));
+
+      this.signalCounter += 1;
+      this.emit({
+        id: `cabal-${this.signalCounter}-${nowMs()}`,
+        type: 'CABAL',
+        mint,
+        timestamp: nowMs(),
+        slot: 0,
+        cabalScore: this.computeScore(bestCluster, bestOverlap),
+        clusterSize: bestCluster.wallets.size,
+        wallets: cabalWallets,
+      });
 
       logger.warn('Cabal play detected', {
         mint: mint.slice(0, 12),

@@ -13,6 +13,7 @@
 
 import type { MintAddress } from '../../core/types/token.js';
 import type { IDetector, SignalHandler } from '../../core/interfaces/detector.js';
+import type { DexPaidSignal } from '../../core/types/signal.js';
 import { nowMs } from '../../core/utils/time.js';
 import { createLogger } from '../../telemetry/logging/logger.js';
 import { Counter, Histogram } from 'prom-client';
@@ -133,6 +134,7 @@ export class DexPaidDetector implements IDetector {
   readonly name = 'dex-paid-detector';
 
   private readonly handlers: SignalHandler[] = [];
+  private signalCounter = 0;
 
   private readonly lateThresholdMinutes: number;
   private readonly cacheTtlMs: number;
@@ -189,6 +191,19 @@ export class DexPaidDetector implements IDetector {
     this.handlers.push(handler);
   }
 
+  private emit(signal: DexPaidSignal): void {
+    for (const handler of this.handlers) {
+      try {
+        handler(signal);
+      } catch (err: unknown) {
+        logger.error('Signal handler threw', {
+          signalId: signal.id,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
   // -----------------------------------------------------------------------
   // Public API
   // -----------------------------------------------------------------------
@@ -227,6 +242,20 @@ export class DexPaidDetector implements IDetector {
 
       if (result.isLate) {
         dexPaidLateDetections.inc();
+
+        this.signalCounter += 1;
+        this.emit({
+          id: `dexpaid-${this.signalCounter}-${nowMs()}`,
+          type: 'DEX_PAID',
+          mint,
+          timestamp: nowMs(),
+          slot: 0,
+          isPaid: result.isPaid,
+          isLate: result.isLate,
+          gapMinutes: result.gapMinutes,
+          paidTimestamp: result.paidTimestamp,
+        });
+
         logger.warn('Late dex paid detected', {
           mint: mint.slice(0, 12),
           gapMinutes: result.gapMinutes,

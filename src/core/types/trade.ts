@@ -5,7 +5,6 @@
  */
 
 import type { MintAddress } from './token.js';
-import type { ExitReason, SkipReason } from './strategy.js';
 
 /** Unique trade identifier */
 export type TradeId = string;
@@ -34,19 +33,4 @@ export interface TradeRecord {
   readonly submittedAt: number;
   readonly confirmedAt: number | null;
   readonly failureReason: string | null;
-}
-
-/** Complete trade pair (entry + exit) */
-export interface TradePair {
-  readonly id: TradeId;
-  readonly mint: MintAddress;
-  readonly entry: TradeRecord;
-  readonly exit: TradeRecord | null;
-  readonly entryPriceSol: bigint;
-  readonly exitPriceSol: bigint | null;
-  readonly pnlSol: bigint | null;
-  readonly pnlPercent: number | null;
-  readonly exitReason: ExitReason | null;
-  readonly skipReason: SkipReason | null;
-  readonly durationMs: number | null;
 }

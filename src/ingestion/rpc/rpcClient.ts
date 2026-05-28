@@ -11,7 +11,6 @@ import {
 } from '@solana/web3.js';
 
 import { RpcError, RpcTimeoutError } from '../../core/errors/rpc.error.js';
-import { RPC_TIMEOUT_MS } from '../../core/constants/timeouts.js';
 import { recordRpcCall, recordRpcError } from '../../telemetry/metrics/ingestionMetrics.js';
 import { createLogger } from '../../telemetry/logging/logger.js';
 import { nowMs } from '../../core/utils/time.js';
@@ -21,16 +20,11 @@ import { RateLimiter } from './rateLimiter.js';
 // Config
 // ---------------------------------------------------------------------------
 
-export interface RpcClientConfig {
+interface RpcClientConfig {
   readonly url: string;
   readonly timeoutMs: number;
   readonly commitment: 'processed' | 'confirmed' | 'finalized';
 }
-
-export const DEFAULT_RPC_CLIENT_CONFIG: Omit<RpcClientConfig, 'url'> = {
-  timeoutMs: RPC_TIMEOUT_MS,
-  commitment: 'confirmed',
-} as const;
 
 // ---------------------------------------------------------------------------
 // Logger

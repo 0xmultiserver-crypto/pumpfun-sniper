@@ -25,26 +25,6 @@ export class RpcTimeoutError extends RpcError {
   }
 }
 
-/** RPC rate limited */
-export class RpcRateLimitError extends RpcError {
-  constructor(message: string, context: Record<string, unknown> = {}) {
-    super(message, 'RPC_RATE_LIMIT', context);
-    this.name = 'RpcRateLimitError';
-  }
-}
-
-/** RPC connection lost */
-export class RpcConnectionError extends RpcError {
-  constructor(message: string, context: Record<string, unknown> = {}) {
-    super(message, 'RPC_CONNECTION_LOST', context);
-    this.name = 'RpcConnectionError';
-  }
-}
-
-/** WebSocket disconnection */
-export class WebSocketDisconnectError extends RpcError {
-  constructor(message: string, context: Record<string, unknown> = {}) {
-    super(message, 'WS_DISCONNECTED', context);
-    this.name = 'WebSocketDisconnectError';
-  }
-}
+/** RPC rate limited (reserved for future use) */
+/** RPC connection lost (reserved for future use) */
+/** WebSocket disconnection (reserved for future use) */

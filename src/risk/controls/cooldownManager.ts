@@ -1,11 +1,11 @@
 /**
  * Cooldown Manager
  *
- * Enforces cooldown periods after stop losses to prevent
- * revenge trading / tilt.
+ * Enforces cooldown periods after exits to prevent revenge trading / tilt.
+ * Triggers on ALL exits except SCALE_OUT (partial sell — position still active).
  *
  * LOCKED VALUES:
- *   - Cooldown after stop loss: 2 minutes (120 seconds)
+ *   - Cooldown after exit: 2 minutes (120 seconds)
  *
  * Risk = capital preservation ONLY. No execution, no strategy logic.
  */

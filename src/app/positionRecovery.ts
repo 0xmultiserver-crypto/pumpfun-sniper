@@ -6,7 +6,6 @@
  * monitoredTrades Set, so TIMEOUT/TP/SL can never fire for that open position.
  */
 
-import { AccountLayout } from '@solana/spl-token';
 import type { Connection, PublicKey } from '@solana/web3.js';
 import type { PositionRegistry } from '../core/state/positionRegistry.js';
 import type { TradeRecord } from '../core/types/trade.js';
@@ -24,7 +23,7 @@ export interface OpenBuyTradeRepository {
 export interface RestoreOpenPositionsParams {
   readonly tradeRepository: OpenBuyTradeRepository;
   readonly positionRegistry: PositionRegistry;
-  readonly monitorTrade: (tradeId: string) => void;
+  readonly monitorTrade: (tradeId: string, mint?: string) => void;
   /** Optional live wallet-balance guard; false means DB row is stale and should not be monitored. */
   readonly hasTokenBalance?: (trade: TradeRecord) => Promise<boolean>;
 }
@@ -78,7 +77,7 @@ export async function restoreOpenPositionsFromDb(
       createdAt: entryTimestamp,
       updatedAt: nowMs(),
     });
-    params.monitorTrade(trade.id);
+    params.monitorTrade(trade.id, trade.mint);
     restored += 1;
 
     logger.info('Restored open BUY from DB for exit monitoring', {
@@ -95,6 +94,7 @@ export async function restoreOpenPositionsFromDb(
 /**
  * Check if a wallet holds a live (on-chain) token balance for the given mint.
  * Used during DB recovery to skip stale positions whose tokens were already sold.
+ * Works with both SPL Token and Token-2022.
  */
 export async function hasLiveTokenBalance(
   connection: Connection,
@@ -106,12 +106,12 @@ export async function hasLiveTokenBalance(
     if (!mintAccount) return false;
     const tokenProgram = mintAccount.owner;
     const ata = deriveUserATA(user, mint, tokenProgram);
-    const tokenAccount = await connection.getAccountInfo(ata);
-    if (!tokenAccount) return false;
-    const decoded = AccountLayout.decode(tokenAccount.data);
-    return BigInt(decoded.amount.toString()) > 0n;
+    // Use getTokenAccountBalance which works for both SPL and Token-2022
+    const balance = await connection.getTokenAccountBalance(ata);
+    return balance.value.uiAmount != null && balance.value.uiAmount > 0;
   } catch (err: unknown) {
-    logger.warn('Could not verify live token balance', {
+    // Account might not exist (already closed) or RPC error
+    logger.debug('Could not verify live token balance', {
       mint: mint.toBase58(),
       error: err instanceof Error ? err.message : String(err),
     });

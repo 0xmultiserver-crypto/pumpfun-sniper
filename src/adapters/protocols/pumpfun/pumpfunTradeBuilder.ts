@@ -105,7 +105,7 @@ export function deriveBondingCurveV2PDA(mint: PublicKey): PublicKey {
 }
 
 /** Current official static fee recipients from @pump-fun/pump-sdk v1.36.0. */
-export const PUMPFUN_FEE_RECIPIENTS = [
+const PUMPFUN_FEE_RECIPIENTS = [
   new PublicKey('62qc2CNXwrYqQScmEdiZFFAnJR262PxWEuNQtxfafNgV'),
   new PublicKey('7VtfL8fvgNfhz17qKRMjzQEXgbdpnHHHQRh54R9jP2RJ'),
   new PublicKey('7hTckgnGnLQR6sdH7YkqFTAA7VwTfYFaZ6EhEsU3saCX'),
@@ -117,7 +117,7 @@ export const PUMPFUN_FEE_RECIPIENTS = [
 ] as const;
 
 /** Current official static buyback recipients from @pump-fun/pump-sdk v1.36.0. */
-export const PUMPFUN_BUYBACK_FEE_RECIPIENTS = [
+const PUMPFUN_BUYBACK_FEE_RECIPIENTS = [
   new PublicKey('5YxQFdt3Tr9zJLvkFccqXVUwhdTWJQc1fFg2YPbxvxeD'),
   new PublicKey('9M4giFFMxmFGXtc3feFzRai56WbBqehoSeRE5GK7gf7'),
   new PublicKey('GXPFM2caqTtQYC2cJ5yJRi9VDkpsYZXzYdwYpGnLmtDL'),
@@ -128,7 +128,7 @@ export const PUMPFUN_BUYBACK_FEE_RECIPIENTS = [
   new PublicKey('A7hAgCzFw14fejgCp387JUJRMNyz4j89JKnhtKU8piqW'),
 ] as const;
 
-export function getStaticPumpfunFeeRecipient(): PublicKey {
+function getStaticPumpfunFeeRecipient(): PublicKey {
   return PUMPFUN_FEE_RECIPIENTS[Math.floor(Math.random() * PUMPFUN_FEE_RECIPIENTS.length)]!;
 }
 

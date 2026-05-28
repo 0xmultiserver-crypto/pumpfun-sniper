@@ -130,6 +130,26 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
         mint: pos.mint,
       });
       positionRegistry.transition(tradeId, 'EXITED', 'NO_TOKEN_BALANCE');
+
+      // Manual sell detected: record PnL (loss) and activate cooldown.
+      // Without this, bot immediately re-buys after manual sell.
+      try {
+        const entrySolLamports = pos.entryAmountSol ?? 0n;
+        const solPriceUsd = await container.solPriceOracle.getSolPriceUsd();
+        const pnlUsd = -Number(entrySolLamports) / 1e9 * solPriceUsd; // 0 exit = full loss
+        recordPnlAndRisk(container, pnlUsd, 'MANUAL_SELL', tradeId, pos.mint);
+        logger.info('Manual sell detected — PnL recorded, cooldown activated', {
+          tradeId,
+          pnlUsd: pnlUsd.toFixed(4),
+        });
+      } catch (pnlErr: unknown) {
+        logger.error('Manual sell PnL recording failed — activating cooldown anyway', {
+          tradeId,
+          error: pnlErr instanceof Error ? pnlErr.message : String(pnlErr),
+        });
+        container.cooldownManager.activateCooldown();
+      }
+
       return { success: true, signature: null, error: null };
     }
 
@@ -289,11 +309,21 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
         });
 
         // Issue 4 fix: Calculate actual P&L from entry/exit SOL amounts
-        const entrySolLamports = pos.entryAmountSol ?? 0n;
-        const exitSolLamports = amountSol;
-        const solPriceUsd = await container.solPriceOracle.getSolPriceUsd();
-        const pnlUsd = Number(exitSolLamports - entrySolLamports) / 1e9 * solPriceUsd;
-        recordPnlAndRisk(container, pnlUsd, params.reason, tradeId);
+        // CRITICAL: cooldown MUST activate even if P&L calc throws
+        try {
+          const entrySolLamports = pos.entryAmountSol ?? 0n;
+          const exitSolLamports = amountSol;
+          const solPriceUsd = await container.solPriceOracle.getSolPriceUsd();
+          const pnlUsd = Number(exitSolLamports - entrySolLamports) / 1e9 * solPriceUsd;
+          recordPnlAndRisk(container, pnlUsd, params.reason, tradeId, pos.mint);
+        } catch (pnlErr: unknown) {
+          logger.error('P&L recording failed (Jupiter) — activating cooldown anyway', {
+            tradeId,
+            reason: params.reason,
+            error: pnlErr instanceof Error ? pnlErr.message : String(pnlErr),
+          });
+          container.cooldownManager.activateCooldown();
+        }
 
         return {
           success: true,
@@ -303,6 +333,9 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
       }
 
       // ── Bonding Curve Sell (not graduated) ──────────────────────
+      // Token balance and quote are fetched INSIDE the retry loop so each
+      // attempt uses fresh data. Previously these were fetched once before
+      // the loop, causing stale minSolOutput on retries.
       tokenAmount = await getUserTokenBalance(user, mint, tokenProgram);
       if (sellPct < 100) {
         tokenAmount = tokenAmount * BigInt(sellPct) / 100n;
@@ -357,6 +390,61 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
       if (attempt > 0) {
         logger.info('Retrying SELL TX with fresh blockhash', { tradeId, attempt });
         await delay(RETRY_DELAY_MS);
+
+        // Re-fetch fresh token balance and quote on retry — bonding curve
+        // state may have changed, and token balance may differ if a
+        // previous TX landed but confirmation timed out.
+        tokenAmount = await getUserTokenBalance(user, mint, tokenProgram);
+        if (tokenAmount === 0n) {
+          logger.info('Token balance zero after retry — sell likely landed', { tradeId });
+          sellConfirmed = true;
+          break;
+        }
+        if (sellPct < 100) {
+          tokenAmount = tokenAmount * BigInt(sellPct) / 100n;
+        }
+
+        try {
+          const [bcAccountRetry, globalAccount, feeConfigAccount, mintSupplyResult] = await Promise.all([
+            container.connection.getAccountInfo(bcPDA),
+            container.connection.getAccountInfo(GLOBAL_PDA),
+            container.connection.getAccountInfo(PUMP_FEE_CONFIG_PDA),
+            container.connection.getTokenSupply(mint),
+          ]);
+          if (globalAccount && bcAccountRetry?.data && bcAccountRetry.data.length >= 49) {
+            const parsedRetry = parseBondingCurveData(bcAccountRetry.data);
+            if (parsedRetry) {
+              // CRITICAL: Check if bonding curve graduated during retry.
+              // If so, break out of BC retry loop — sell needs to go through Jupiter.
+              if (parsedRetry.complete) {
+                logger.warn('Bonding curve graduated during sell retry — need Jupiter route', {
+                  tradeId, attempt,
+                });
+                // Mark as not confirmed so outer code can re-route
+                sellConfirmed = false;
+                break;
+              }
+              const global = pumpSdk.decodeGlobal(globalAccount);
+              const feeConfig = feeConfigAccount ? pumpSdk.decodeFeeConfig(feeConfigAccount) : null;
+              const mintSupply = toBN(mintSupplyResult.value.amount);
+              const bondingCurve = buildOfficialPumpfunBondingCurve(parsedRetry, mintSupplyResult.value.amount);
+              const sellQuote = quoteOfficialPumpfunSell({
+                global, feeConfig, mintSupply, bondingCurve, tokenAmount, slippageBps: SLIPPAGE_BPS,
+              });
+              expectedSolOutput = sellQuote.expectedSolOutput;
+              minSolOutput = sellQuote.minSolOutput;
+              feeRecipient = sellQuote.feeAccounts.feeRecipient;
+              buybackFeeRecipient = sellQuote.feeAccounts.buybackFeeRecipient;
+              logger.info('Sell quote refreshed on retry', {
+                tradeId, attempt, minSolOutput: minSolOutput.toString(),
+              });
+            }
+          }
+        } catch (quoteErr: unknown) {
+          logger.warn('Failed to refresh sell quote on retry — using previous values', {
+            tradeId, attempt, error: quoteErr instanceof Error ? quoteErr.message : String(quoteErr),
+          });
+        }
       }
 
       const instructions = await buildPumpfunSellInstructions({
@@ -407,45 +495,77 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
     // Save sell trade to DB. Use confirmed transaction meta for accounting;
     // expectedSolOutput is only a fallback if RPC cannot return meta after a
     // confirmed sell. Failed sells record zero proceeds.
-    const sellAccounting = sellConfirmed && signature
-      ? await getConfirmedSellAmountSol({
-        connection: container.connection,
-        signature,
-        wallet: user,
-        fallbackLamports: expectedSolOutput,
+
+    // If BC sell failed because bonding curve graduated during retry,
+    // do NOT record as failed — let exit monitor re-route to Jupiter next poll.
+    if (!sellConfirmed && signature === null && confirmationError === null) {
+      // Graduation detected during retry — position stays ENTERED,
+      // exit monitor will pick it up and route to Jupiter.
+      logger.info('BC sell incomplete due to graduation — will retry via Jupiter', { tradeId });
+      return { success: false, signature: null, error: 'Bonding curve graduated — retry via Jupiter' };
+    }
+
+    let confirmedSellAmountSol = 0n;
+    try {
+      const sellAccounting = sellConfirmed && signature
+        ? await getConfirmedSellAmountSol({
+          connection: container.connection,
+          signature,
+          wallet: user,
+          fallbackLamports: expectedSolOutput,
+          tradeId,
+        })
+        : {
+          amountSolLamports: sellConfirmed ? expectedSolOutput : 0n,
+          walletDeltaLamports: sellConfirmed ? expectedSolOutput : 0n,
+          feeLamports: 0n,
+          rentPaidLamports: 0n,
+          rentRefundedLamports: 0n,
+        };
+      confirmedSellAmountSol = sellAccounting.amountSolLamports;
+      logger.info('SELL on-chain accounting resolved', {
         tradeId,
-      })
-      : {
-        amountSolLamports: sellConfirmed ? expectedSolOutput : 0n,
-        walletDeltaLamports: sellConfirmed ? expectedSolOutput : 0n,
-        feeLamports: 0n,
-        rentPaidLamports: 0n,
-        rentRefundedLamports: 0n,
-      };
-    const confirmedSellAmountSol = sellAccounting.amountSolLamports;
-    logger.info('SELL on-chain accounting resolved', {
-      tradeId,
-      amountSolLamports: confirmedSellAmountSol.toString(),
-      walletDeltaLamports: sellAccounting.walletDeltaLamports.toString(),
-      feeLamports: sellAccounting.feeLamports.toString(),
-      rentPaidLamports: sellAccounting.rentPaidLamports.toString(),
-      rentRefundedLamports: sellAccounting.rentRefundedLamports.toString(),
-    });
-    await saveTrade(container, {
-      id: `sell-${tradeId}`,
-      mint: pos.mint,
-      side: 'SELL',
-      status: sellConfirmed ? 'CONFIRMED' : 'FAILED',
-      amountSol: confirmedSellAmountSol,
-      amountTokens: tokenAmount,
-      signature,
-      slot: null,
-      submittedAt: nowMs(),
-      confirmedAt: sellConfirmed ? nowMs() : null,
-      failureReason: sellConfirmed ? null : confirmationError,
-    });
+        amountSolLamports: confirmedSellAmountSol.toString(),
+        walletDeltaLamports: sellAccounting.walletDeltaLamports.toString(),
+        feeLamports: sellAccounting.feeLamports.toString(),
+        rentPaidLamports: sellAccounting.rentPaidLamports.toString(),
+        rentRefundedLamports: sellAccounting.rentRefundedLamports.toString(),
+      });
+    } catch (accountingErr: unknown) {
+      logger.error('SELL on-chain accounting failed — using fallback', {
+        tradeId,
+        error: accountingErr instanceof Error ? accountingErr.message : String(accountingErr),
+      });
+      confirmedSellAmountSol = sellConfirmed ? expectedSolOutput : 0n;
+    }
+
+    // CRITICAL: Save trade and transition position MUST both run even if
+    // one fails. Previously saveTrade failure would skip position cleanup,
+    // leaving the position ENTERED forever.
+    try {
+      await saveTrade(container, {
+        id: `sell-${tradeId}`,
+        mint: pos.mint,
+        side: 'SELL',
+        status: sellConfirmed ? 'CONFIRMED' : 'FAILED',
+        amountSol: confirmedSellAmountSol,
+        amountTokens: tokenAmount,
+        signature,
+        slot: null,
+        submittedAt: nowMs(),
+        confirmedAt: sellConfirmed ? nowMs() : null,
+        failureReason: sellConfirmed ? null : confirmationError,
+      });
+    } catch (saveErr: unknown) {
+      logger.error('Failed to save sell trade to DB', {
+        tradeId,
+        error: saveErr instanceof Error ? saveErr.message : String(saveErr),
+      });
+    }
 
     if (!sellConfirmed) {
+      // Activate cooldown even on failed sell to prevent buy-fail loop
+      container.cooldownManager.activateCooldown();
       return { success: false, signature, error: confirmationError ?? 'Sell confirmation failed' };
     }
 
@@ -470,11 +590,25 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
     });
 
     // Issue 4 fix: Calculate actual P&L from confirmed on-chain trade amounts
-    const entrySolLamports = pos.entryAmountSol ?? 0n;
-    const exitSolLamports = confirmedSellAmountSol;
-    const solPriceUsd = await container.solPriceOracle.getSolPriceUsd();
-    const pnlUsd = Number(exitSolLamports - entrySolLamports) / 1e9 * solPriceUsd;
-    recordPnlAndRisk(container, pnlUsd, params.reason, tradeId);
+    // CRITICAL: recordPnlAndRisk MUST run even if P&L calculation throws.
+    // Without this, cooldown is never activated and the bot immediately
+    // re-buys the same token after a loss.
+    try {
+      const entrySolLamports = pos.entryAmountSol ?? 0n;
+      const exitSolLamports = confirmedSellAmountSol;
+      const solPriceUsd = await container.solPriceOracle.getSolPriceUsd();
+      const pnlUsd = Number(exitSolLamports - entrySolLamports) / 1e9 * solPriceUsd;
+      recordPnlAndRisk(container, pnlUsd, params.reason, tradeId, pos.mint);
+    } catch (pnlErr: unknown) {
+      logger.error('P&L recording failed — activating cooldown anyway', {
+        tradeId,
+        reason: params.reason,
+        error: pnlErr instanceof Error ? pnlErr.message : String(pnlErr),
+      });
+      // Cooldown MUST activate even if P&L calc fails, otherwise bot
+      // immediately re-buys after a loss
+      container.cooldownManager.activateCooldown();
+    }
 
     return {
       success: true,
@@ -484,6 +618,12 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error('SELL FAILED', { tradeId, error: msg });
+    // Activate cooldown even on unhandled exception to prevent buy-fail loop
+    try {
+      container.cooldownManager.activateCooldown();
+    } catch (_) {
+      // Best effort — don't mask original error
+    }
     return { success: false, signature: null, error: msg };
   }
 }

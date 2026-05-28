@@ -45,12 +45,3 @@ export interface BondingCurveState {
   readonly realTokenReserves: bigint;
   readonly complete: boolean;
 }
-
-/** Token launch origin info */
-export interface TokenLaunchInfo {
-  readonly mint: MintAddress;
-  readonly creator: PublicKey;
-  readonly createdAt: number;
-  readonly slot: number;
-  readonly signature: string;
-}

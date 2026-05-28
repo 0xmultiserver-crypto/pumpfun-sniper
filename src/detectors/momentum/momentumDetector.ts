@@ -69,6 +69,8 @@ const DEFAULT_MAX_TRACKED_TOKENS = DEFAULT_MOMENTUM_MAX_TRACKED_TOKENS;
 interface TokenMomentumState {
   /** Circular buffer of recent buy timestamps and amounts. */
   buys: Array<{ timestamp: number; solAmount: bigint; slot: number; wallet?: string }>;
+  /** Circular buffer of recent sell timestamps. */
+  sells: Array<{ timestamp: number }>;
   /** Unique slots with buys in the current window. */
   uniqueSlots: Set<number>;
   /** Unique wallets with buys in the current window. */
@@ -157,7 +159,20 @@ export class MomentumDetector implements IDetector {
    */
   handleTrade(event: TradeEvent): void {
     if (!this.running) return;
-    if (!event.isBuy) return;
+
+    // Track sells for sell pressure detection
+    if (!event.isBuy) {
+      let state = this.tokenStates.get(event.mint);
+      if (state === undefined) {
+        state = { buys: [], sells: [], uniqueSlots: new Set(), uniqueWallets: new Set(), lastSignalAt: 0 };
+        this.tokenStates.set(event.mint, state);
+      }
+      state.sells.push({ timestamp: event.timestamp });
+      // Trim expired sells
+      const sellCutoff = nowMs() - this.windowMs;
+      state.sells = state.sells.filter((s) => s.timestamp >= sellCutoff);
+      return;
+    }
 
     // Enforce max tracked tokens
     if (!this.tokenStates.has(event.mint) && this.tokenStates.size >= this.maxTrackedTokens) {
@@ -167,7 +182,7 @@ export class MomentumDetector implements IDetector {
 
     let state = this.tokenStates.get(event.mint);
     if (state === undefined) {
-      state = { buys: [], uniqueSlots: new Set(), uniqueWallets: new Set(), lastSignalAt: 0 };
+      state = { buys: [], sells: [], uniqueSlots: new Set(), uniqueWallets: new Set(), lastSignalAt: 0 };
       this.tokenStates.set(event.mint, state);
     }
 
@@ -214,7 +229,7 @@ export class MomentumDetector implements IDetector {
         const bundleRatio = buyCount / Math.max(uniqueEntityCount, 1);
 
         if (bundleRatio >= 3 && uniqueEntityCount <= 2) {
-          logger.warn('BUNDLE DETECTED — skipping momentum signal', {
+          logger.info('BUNDLE DETECTED — skipping momentum signal', {
             mint: event.mint.slice(0, 12),
             buyCount,
             uniqueWallets: uniqueWalletCount,
@@ -229,7 +244,8 @@ export class MomentumDetector implements IDetector {
         const now = nowMs();
         if (now - state.lastSignalAt >= this.cooldownMs) {
           state.lastSignalAt = now;
-          this.emitMomentumSignal(event.mint, buyCount, totalVolume, event.slot, uniqueSlotCount, uniqueWalletCount);
+          const sellCount = state.sells.filter(s => s.timestamp >= nowMs() - this.windowMs).length;
+          this.emitMomentumSignal(event.mint, buyCount, totalVolume, event.slot, uniqueSlotCount, uniqueWalletCount, sellCount);
         }
       }
     }
@@ -246,6 +262,7 @@ export class MomentumDetector implements IDetector {
     slot: number,
     uniqueSlotCount: number,
     uniqueWalletCount: number,
+    sellCount: number,
   ): void {
     this.signalCounter += 1;
     const signalId = `momentum-${slot}-${this.signalCounter}`;
@@ -260,9 +277,11 @@ export class MomentumDetector implements IDetector {
       windowSeconds: this.windowSeconds,
       volumeSol,
       uniqueSlotCount,
+      uniqueWalletCount,
+      sellCount,
     };
 
-    logger.info('Momentum signal emitted', {
+    logger.debug('Momentum signal emitted', {
       signalId,
       mint,
       buyCount,

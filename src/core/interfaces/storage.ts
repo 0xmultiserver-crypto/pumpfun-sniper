@@ -16,18 +16,3 @@ export interface IRepository<T, K = string> {
   /** Delete by primary key */
   delete(id: K): Promise<void>;
 }
-
-/** Cache store contract (Redis) — hot ephemeral state only */
-export interface ICacheStore {
-  /** Get a value by key */
-  get<T>(key: string): Promise<T | null>;
-
-  /** Set a value with optional TTL in seconds */
-  set<T>(key: string, value: T, ttlSeconds?: number): Promise<void>;
-
-  /** Delete a key */
-  delete(key: string): Promise<void>;
-
-  /** Check if key exists */
-  exists(key: string): Promise<boolean>;
-}
