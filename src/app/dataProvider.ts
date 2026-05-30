@@ -10,14 +10,20 @@ import type { StrategyDataProvider } from '../strategies/filteredSniper/filtered
 import type { EntryCheckData } from '../strategies/filteredSniper/entryDecision.js';
 import type { PositionData } from '../strategies/filteredSniper/exitDecision.js';
 import type { MintAddress } from '../core/types/token.js';
-import type { Signal, LaunchSignal } from '../core/types/signal.js';
+import type { Signal, LaunchSignal, MomentumSignal } from '../core/types/signal.js';
 import type { WalletAddress } from '../core/types/wallet.js';
 import type { PositionRegistry } from '../core/state/positionRegistry.js';
+import { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import type { AntiRugMonitor } from '../risk/controls/antiRug.js';
 import { createLogger } from '../telemetry/logging/logger.js';
 import { deriveBondingCurvePDA } from '../adapters/protocols/pumpfun/shared.js';
 import { parseBondingCurveData } from '../adapters/protocols/pumpfun/tokenParser.js';
-import { METADATA_PROGRAM_ID } from '../core/constants/programs.js';
+import { derivePoolStatePDA } from '../adapters/protocols/bonkfun/bonkfunTradeBuilder.js';
+import { parsePoolStateData, calculatePriceLamports as bonkfunPriceLamports } from '../adapters/protocols/bonkfun/tokenParser.js';
+import { BONKFUN_PLATFORM_CONFIG, METADATA_PROGRAM_ID, MIN_BONKFUN_POOL_STATE_SIZE, TOKEN_2022_PROGRAM_ID } from '../core/constants/programs.js';
+import { SOL_FALLBACK_PRICE_USD } from '../core/constants/defaults/infrastructure.js';
 import { nowMs } from '../core/utils/time.js';
+import { computeBondingCurvePriceScaled } from '../core/utils/price.js';
 import {
   CREATOR_HISTORY_MAX_LAUNCHES,
   CREATOR_HISTORY_WINDOW_MS,
@@ -35,8 +41,31 @@ import {
 
 const logger = createLogger('main:dataProvider');
 
+/** Cached SOL price with fallback — prevents oracle outage from disabling checks 10/17/18. */
+let cachedSolPriceUsd: number = SOL_FALLBACK_PRICE_USD;
+let solPriceCacheTime = 0;
+const SOL_PRICE_CACHE_TTL_MS = 60_000; // 60s cache
+
+async function getSolPriceWithFallback(oracle: { getSolPriceUsd(): Promise<number> }): Promise<number> {
+  try {
+    const price = await oracle.getSolPriceUsd();
+    if (price > 0) {
+      cachedSolPriceUsd = price;
+      solPriceCacheTime = Date.now();
+      return price;
+    }
+  } catch { /* fall through to cache */ }
+  // Return cached if fresh, otherwise fallback constant
+  return (Date.now() - solPriceCacheTime < SOL_PRICE_CACHE_TTL_MS)
+    ? cachedSolPriceUsd
+    : SOL_FALLBACK_PRICE_USD;
+}
+
 /** In-memory highest price tracking per trade. */
 const highestPriceTracker = new Map<string, bigint>();
+
+/** Anti-rug triggered flags per mint (set by AntiRugMonitor callback). */
+const antiRugTriggeredMints = new Set<string>();
 
 /** Jupiter price cache per mint (price in SOL per raw token). Avoids hammering API every 1s poll. */
 const graduatedPriceCache = new Map<string, { priceLamports: bigint; fetchedAt: number }>();
@@ -48,6 +77,7 @@ const SOL_MINT = 'So11111111111111111111111111111111111111112';
  * Fetch graduated token price from Jupiter Price API.
  * Returns price in lamports per raw token unit (6 decimals).
  * Cached for 5s to avoid hammering the API on every exit monitor poll.
+ * Falls back to DexScreener if Jupiter returns null.
  */
 async function fetchGraduatedPriceLamports(mint: string): Promise<bigint | null> {
   const cached = graduatedPriceCache.get(mint);
@@ -55,6 +85,7 @@ async function fetchGraduatedPriceLamports(mint: string): Promise<bigint | null>
     return cached.priceLamports;
   }
 
+  // Try Jupiter first
   try {
     const url = `${JUPITER_PRICE_API}?ids=${mint}&vsToken=${SOL_MINT}`;
     const controller = new AbortController();
@@ -66,28 +97,65 @@ async function fetchGraduatedPriceLamports(mint: string): Promise<bigint | null>
     });
     clearTimeout(timer);
 
-    if (!response.ok) return null;
+    if (response.ok) {
+      const data = await response.json() as { data?: Record<string, { price?: number }> };
+      const priceSol = data.data?.[mint]?.price;
 
-    const data = await response.json() as { data?: Record<string, { price?: number }> };
-    const priceSol = data.data?.[mint]?.price;
-
-    if (typeof priceSol !== 'number' || priceSol <= 0) return null;
-
-    // Jupiter returns price as SOL per 1 token (human-readable).
-    // 1 token = 10^6 raw units. We need lamports per raw unit.
-    // priceLamports = priceSol * 10^9 / 10^6 = priceSol * 10^3
-    const priceLamports = BigInt(Math.round(priceSol * 1_000));
-
-    graduatedPriceCache.set(mint, { priceLamports, fetchedAt: nowMs() });
-    logger.debug('Jupiter graduated price fetched', { mint, priceSol, priceLamports: priceLamports.toString() });
-    return priceLamports;
+      if (typeof priceSol === 'number' && priceSol > 0) {
+        const priceLamports = BigInt(Math.round(priceSol * 1_000_000_000));
+        graduatedPriceCache.set(mint, { priceLamports, fetchedAt: nowMs() });
+        logger.debug('Jupiter graduated price fetched', { mint, priceSol, priceLamports: priceLamports.toString() });
+        return priceLamports;
+      }
+    }
   } catch (err: unknown) {
-    logger.warn('Jupiter graduated price fetch failed', {
+    logger.debug('Jupiter graduated price fetch failed, trying DexScreener', {
       mint,
       error: err instanceof Error ? err.message : String(err),
     });
-    return cached?.priceLamports ?? null;
   }
+
+  // Fallback: DexScreener
+  try {
+    const url = `https://api.dexscreener.com/latest/dex/tokens/${mint}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5_000);
+
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: { Accept: 'application/json' },
+    });
+    clearTimeout(timer);
+
+    if (response.ok) {
+      const data = await response.json() as { pairs?: Array<{ priceUsd?: string; quoteToken?: string }> };
+      const pair = data.pairs?.[0];
+      if (pair?.priceUsd) {
+        const priceUsd = parseFloat(pair.priceUsd);
+        if (priceUsd > 0) {
+          // Get SOL price to convert USD → SOL → lamports
+          const solResp = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
+          const solData = await solResp.json() as { solana?: { usd?: number } };
+          const solPrice = solData?.solana?.usd ?? SOL_FALLBACK_PRICE_USD;
+          const priceSol = priceUsd / solPrice;
+          const priceLamports = BigInt(Math.round(priceSol * 1_000_000_000));
+          graduatedPriceCache.set(mint, { priceLamports, fetchedAt: nowMs() });
+          logger.info('DexScreener graduated price fetched (Jupiter fallback)', {
+            mint, priceUsd, priceSol, priceLamports: priceLamports.toString(),
+          });
+          return priceLamports;
+        }
+      }
+    }
+  } catch (err: unknown) {
+    logger.debug('DexScreener graduated price fetch also failed', {
+      mint,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Both failed — return cached if available
+  return cached?.priceLamports ?? null;
 }
 
 // Metaplex Token Metadata PDA
@@ -110,14 +178,49 @@ function deriveMetadataPDA(mint: PublicKey): PublicKey {
 export function createDataProvider(
   container: ServiceContainer,
   positionRegistry: PositionRegistry,
-  detectors?: { bundleDetector?: { getLatestBundlePct(mint: string): number | null; forceAnalyze(mint: string): number }; washTradeDetector?: { getLatestWashScore(mint: string): number | null; forceAnalyze(mint: string): number } },
+  detectors?: { bundleDetector?: { getLatestBundlePct(mint: string): number | null; forceAnalyze(mint: string): number | null }; washTradeDetector?: { getLatestWashScore(mint: string): number | null; forceAnalyze(mint: string): number | null }; smartMoneyDetector?: { checkSmartMoney(mint: string): { smartMoneyScore: number; smartWalletCount: number } | null } },
+  antiRugMonitor?: AntiRugMonitor,
 ): StrategyDataProvider {
   const conn = container.connection;
 
   // In-memory caches (per session)
   const metadataCache = new Map<string, { name: string; symbol: string; uri: string } | null>();
 
+  // Periodic cache cleanup (every 60s) to prevent memory leaks
+  const CLEANUP_INTERVAL_MS = 60_000;
+  const cleanupInterval = setInterval(() => {
+    const now = Date.now();
+    // Clean graduated price cache (entries older than 30s)
+    for (const [key, val] of graduatedPriceCache) {
+      if (now - val.fetchedAt > 30_000) graduatedPriceCache.delete(key);
+    }
+    // Cap metadata cache at 5000 entries
+    if (metadataCache.size > 5000) {
+      const keys = [...metadataCache.keys()];
+      for (let i = 0; i < keys.length - 3000; i++) metadataCache.delete(keys[i]!);
+    }
+  }, CLEANUP_INTERVAL_MS);
+  cleanupInterval.unref(); // Don't prevent process exit
+
   return {
+    startAntiRugMonitoring(mint: string): void {
+      if (!antiRugMonitor) return;
+      antiRugMonitor.startMonitoring(mint, (detectedMint: string, _details: string) => {
+        antiRugTriggeredMints.add(detectedMint);
+        logger.warn('Anti-rug triggered for mint', { mint: detectedMint.slice(0, 12) });
+      });
+    },
+
+    stopAntiRugMonitoring(mint: string): void {
+      if (!antiRugMonitor) return;
+      antiRugMonitor.stopMonitoring(mint);
+      antiRugTriggeredMints.delete(mint);
+    },
+
+    transitionPosition(tradeId: string, to: string, reason: string): void {
+      positionRegistry.transition(tradeId, to as any, reason);
+    },
+
     async getEntryCheckData(signal: Signal): Promise<EntryCheckData> {
       const mint = signal.mint;
       const mintPk = new PublicKey(mint);
@@ -134,6 +237,8 @@ export function createDataProvider(
         conn.getTokenSupply(mintPk),
         // Fetch 6: Previously persisted signals for launch provenance
         container.signalRepository.findByMint(mint),
+        // Fetch 7: BonkFun/LaunchLab pool state (venue-aware liquidity + price)
+        conn.getAccountInfo(derivePoolStatePDA(mintPk)),
       ]);
 
       const signalsForMint = results[5].status === 'fulfilled' ? results[5].value : [];
@@ -151,7 +256,8 @@ export function createDataProvider(
       const { mintAuthorityRevoked, freezeAuthorityRevoked } = evaluateAuthority(mint, mintAccount);
 
       const bondingCurveAccount = results[1].status === 'fulfilled' ? results[1].value : null;
-      const { liquiditySane, bondingCurveCreator } = evaluateLiquidity(bondingCurveAccount);
+      const poolStateAccount = results[6].status === 'fulfilled' ? results[6].value : null;
+      const { liquiditySane, bondingCurveCreator } = evaluateLiquidity(bondingCurveAccount, poolStateAccount);
 
       const creatorAddress = (latestLaunch?.creator ?? bondingCurveCreator) as WalletAddress | null;
       const launchDetected = evaluateLaunchProvenance(launchSignals, liquiditySane, creatorAddress);
@@ -190,8 +296,29 @@ export function createDataProvider(
 
       const largestAccounts = results[3].status === 'fulfilled' ? results[3].value : null;
       const supply = results[4].status === 'fulfilled' ? results[4].value : null;
+
+      // Filter out bonding curve ATA from largest accounts for PumpFun tokens
+      // Bonding curve holds unsold supply — not a real "whale"
+      // Must filter BOTH standard Token Program ATA AND Token-2022 ATA
+      let filteredLargestAccounts = largestAccounts?.value ?? null;
+      if (filteredLargestAccounts && bondingCurveAccount) {
+        const bcPDA = deriveBondingCurvePDA(mintPk);
+        const bcATA = getAssociatedTokenAddressSync(mintPk, bcPDA, true, TOKEN_PROGRAM_ID);
+        const bcATA2022 = getAssociatedTokenAddressSync(mintPk, bcPDA, true, TOKEN_2022_PROGRAM_ID);
+        const bcPDAStr = bcPDA.toBase58();
+        const bcATAStr = bcATA.toBase58();
+        const bcATA2022Str = bcATA2022.toBase58();
+        // Filter out BC PDA, standard ATA, and Token-2022 ATA
+        filteredLargestAccounts = filteredLargestAccounts.filter(
+          acc => {
+            const addr = typeof acc.address === 'string' ? acc.address : acc.address.toBase58();
+            return addr !== bcPDAStr && addr !== bcATAStr && addr !== bcATA2022Str;
+          },
+        );
+      }
+
       const walletConcentrationAcceptable = evaluateConcentration(
-        largestAccounts?.value ?? null,
+        filteredLargestAccounts,
         supply?.value.amount ?? null,
       );
 
@@ -207,15 +334,50 @@ export function createDataProvider(
         parsedBC = parseBondingCurveData(bondingCurveAccount.data);
       }
 
+      // --- BonkFun pool state (venue-aware) ---
+      // If bonding curve doesn't exist, check LaunchLab pool state
+      const poolAccount = results[6].status === 'fulfilled' ? results[6].value : null;
+      let parsedPool: { virtualBase: bigint; virtualQuote: bigint; realBase: bigint; realQuote: bigint; complete: boolean; platformConfig: { equals(pk: PublicKey): boolean } } | null = null;
+      if (!parsedBC && poolAccount?.data && poolAccount.data.length >= MIN_BONKFUN_POOL_STATE_SIZE) {
+        const raw = parsePoolStateData(Buffer.from(poolAccount.data), mint);
+        if (raw && raw.platformConfig.equals(BONKFUN_PLATFORM_CONFIG)) {
+          parsedPool = raw;
+        }
+      }
+
+      // Re-evaluate concentration for BonkFun: exclude pool's base_vault
+      // The vault holds pool reserves and would artificially inflate concentration
+      let finalConcentration = walletConcentrationAcceptable;
+      if (parsedPool && filteredLargestAccounts && poolAccount?.data && poolAccount.data.length >= 301) {
+        const baseVaultPk = new PublicKey(poolAccount.data.subarray(269, 301)); // 8+261, verified on-chain
+        const baseVaultStr = baseVaultPk.toBase58();
+        const filtered = filteredLargestAccounts.filter(
+          acc => (typeof acc.address === 'string' ? acc.address : acc.address.toBase58()) !== baseVaultStr,
+        );
+        finalConcentration = evaluateConcentration(filtered, supply?.value.amount ?? null);
+      }
+
       let priceImpactBps: number | null = null;
       if (parsedBC && parsedBC.virtualSolReserves > 0n) {
         try {
-          const solPriceUsd = await container.solPriceOracle.getSolPriceUsd();
+          const solPriceUsd = await getSolPriceWithFallback(container.solPriceOracle);
           const positionSizeLamports = computePositionSizeLamports(solPriceUsd);
-          // Use floating-point to avoid BigInt truncation to 0 for small positions
+          // virtualSolReserves is in lamports (PumpFun confirmed)
           priceImpactBps = Number(positionSizeLamports * 10000n) / Number(parsedBC.virtualSolReserves + positionSizeLamports);
         } catch (err: unknown) {
           logger.warn('Failed to compute price impact — SOL price unavailable', {
+            mint: mint.slice(0, 12),
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      } else if (parsedPool && parsedPool.virtualQuote > 0n) {
+        // BonkFun price impact: use virtualQuote (SOL reserves)
+        try {
+          const solPriceUsd = await getSolPriceWithFallback(container.solPriceOracle);
+          const positionSizeLamports = computePositionSizeLamports(solPriceUsd);
+          priceImpactBps = Number(positionSizeLamports * 10000n) / Number(parsedPool.virtualQuote + positionSizeLamports);
+        } catch (err: unknown) {
+          logger.warn('Failed to compute BonkFun price impact — SOL price unavailable', {
             mint: mint.slice(0, 12),
             error: err instanceof Error ? err.message : String(err),
           });
@@ -249,14 +411,30 @@ export function createDataProvider(
       let marketCapUsd: number | null = null;
       if (parsedBC && parsedBC.virtualTokenReserves > 0n && supply?.value) {
         try {
-          const pricePerTokenLamports = parsedBC.virtualSolReserves * 10n ** 9n / parsedBC.virtualTokenReserves;
+          const pricePerTokenLamports = computeBondingCurvePriceScaled(parsedBC.virtualSolReserves, parsedBC.virtualTokenReserves);
           const totalSupplyRaw = BigInt(supply.value.amount);
           const marketCapLamports = pricePerTokenLamports * totalSupplyRaw;
-          const solPriceUsd = await container.solPriceOracle.getSolPriceUsd();
-          // Divide in BigInt first to avoid Number overflow (marketCapLamports can exceed 2^53)
-          marketCapUsd = Number(marketCapLamports / 10n ** 9n) * solPriceUsd;
+          const solPriceUsd = await getSolPriceWithFallback(container.solPriceOracle);
+          // pricePerTokenScaled is in (lamports * 10^6) / raw_token units.
+          // marketCapLamports = priceScaled * supply → in (lamports * 10^6) units.
+          // To get SOL: /10^6 (undo scaling) / 10^9 (lamports→SOL) = /10^15
+          marketCapUsd = Number(marketCapLamports / 10n ** 15n) * solPriceUsd;
         } catch (err: unknown) {
           logger.warn('Failed to calculate market cap', {
+            mint: mint.slice(0, 12),
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      } else if (parsedPool && parsedPool.virtualBase > 0n && supply?.value) {
+        // BonkFun market cap: use virtualQuote/virtualBase for price
+        try {
+          const totalSupplyRaw = BigInt(supply.value.amount);
+          const marketCapLamports = (parsedPool.virtualQuote * totalSupplyRaw) / parsedPool.virtualBase;
+          const solPriceUsd = await getSolPriceWithFallback(container.solPriceOracle);
+          // virtualQuote is in 10-lamport units. Actual SOL = virtualQuote / 10 / 10^9
+          marketCapUsd = Number(marketCapLamports / 10n ** 10n) * solPriceUsd;
+        } catch (err: unknown) {
+          logger.warn('Failed to calculate BonkFun market cap', {
             mint: mint.slice(0, 12),
             error: err instanceof Error ? err.message : String(err),
           });
@@ -274,7 +452,7 @@ export function createDataProvider(
         freezeAuthorityRevoked,
         metadataSane,
         liquiditySane,
-        walletConcentrationAcceptable,
+        walletConcentrationAcceptable: finalConcentration,
         creatorNotBlacklisted,
         priceImpactBps,
         secondsSinceLaunch,
@@ -291,30 +469,39 @@ export function createDataProvider(
         freezeAuthorityRevoked,
         metadataSane,
         liquiditySane,
-        walletConcentrationAcceptable,
+        walletConcentrationAcceptable: finalConcentration,
         buyCountInWindow,
         volumeLamports,
         windowMs,
         priceImpactBps,
         bundlePct: detectors?.bundleDetector?.forceAnalyze(mint as any) ?? null,
         washTradeScore: detectors?.washTradeDetector?.forceAnalyze(mint) ?? null,
-        uniqueWallets: 'uniqueWalletCount' in signal ? (signal as any).uniqueWalletCount as number : undefined,
+        uniqueWallets: signal.type === 'MOMENTUM' ? (signal as MomentumSignal).uniqueWalletCount : undefined,
         // Check 14: Sell pressure — now available from momentum signal
-        sellCountInWindow: 'sellCount' in signal ? (signal as any).sellCount as number : undefined,
-        // Check 15: Real SOL reserves in bonding curve
-        realSolReservesLamports: parsedBC?.realSolReserves ?? null,
+        sellCountInWindow: signal.type === 'MOMENTUM' ? (signal as MomentumSignal).sellCount : undefined,
+        // Check 15: Real SOL reserves in bonding curve (or BonkFun pool)
+        // Both PumpFun realSolReserves and BonkFun realQuote are in lamports
+        realSolReservesLamports: parsedBC ? parsedBC.realSolReserves : (parsedPool ? parsedPool.realQuote : null),
         // Check 16: Real holder count from Helius API (not just top 20)
         holderCount: await getRealHolderCount(mint, container.heliusApiKey).catch(() => largestAccounts?.value?.length ?? null),
-        // Check 18: Real 1h volume in USD from DexScreener (not momentum window)
+        // Check 18: Volume in USD — try DexScreener first, fallback to momentum window
         volumeUsd: await getRealVolume1h(mint).catch(() => null)
           ?? await (async () => {
+            if (Number(volumeLamports) <= 0) return undefined;
             try {
-              const solPrice = await container.solPriceOracle.getSolPriceUsd();
-              return Number(volumeLamports) / 1e9 * solPrice || undefined;
+              const solPrice = await getSolPriceWithFallback(container.solPriceOracle);
+              return Number(volumeLamports) / 1e9 * solPrice;
             } catch { return undefined; }
           })(),
         secondsSinceLaunch: secondsSinceLaunch ?? undefined,
         marketCapUsd,
+        // Check 19: Smart money detection (single call, reuse result)
+        ...(() => {
+          try {
+            const sm = detectors?.smartMoneyDetector?.checkSmartMoney(mint as any);
+            return { smartMoneyScore: sm?.smartMoneyScore ?? null, smartWalletCount: sm?.smartWalletCount ?? 0 };
+          } catch { return { smartMoneyScore: null, smartWalletCount: 0 }; }
+        })(),
       };
     },
 
@@ -356,7 +543,7 @@ export function createDataProvider(
         if (parsed) {
           graduated = parsed.complete;
           if (!graduated && parsed.virtualTokenReserves > 0n) {
-            currentPriceLamports = (parsed.virtualSolReserves * 10n ** 9n) / parsed.virtualTokenReserves;
+            currentPriceLamports = computeBondingCurvePriceScaled(parsed.virtualSolReserves, parsed.virtualTokenReserves);
           }
         } else {
           // Parse failed — bonding curve data is corrupt or format changed.
@@ -367,6 +554,44 @@ export function createDataProvider(
               mint: pos.mint,
               dataLength: bcAccount.data.length,
               fallbackPrice: prevHighest.toString(),
+            });
+          }
+        }
+      } else if (!bcAccount && !rpcFailed) {
+        // Bonding curve doesn't exist — check if it's a BonkFun (LaunchLab) token
+        const poolPDA = derivePoolStatePDA(mintPk);
+        let foundBonkfun = false;
+        try {
+          const poolAccount = await conn.getAccountInfo(poolPDA);
+          if (poolAccount?.data && poolAccount.data.length >= MIN_BONKFUN_POOL_STATE_SIZE) {
+            const parsedPool = parsePoolStateData(Buffer.from(poolAccount.data), pos.mint);
+            if (parsedPool && parsedPool.platformConfig.equals(BONKFUN_PLATFORM_CONFIG)) {
+              foundBonkfun = true;
+              graduated = parsedPool.complete;
+              if (!graduated && parsedPool.virtualBase > 0n) {
+                currentPriceLamports = bonkfunPriceLamports(parsedPool);
+                logger.debug('BonkFun price fetched', {
+                  mint: pos.mint,
+                  priceLamports: currentPriceLamports.toString(),
+                });
+              }
+            }
+          }
+        } catch (poolErr: unknown) {
+          logger.warn('Failed to fetch BonkFun pool state', {
+            mint: pos.mint,
+            error: poolErr instanceof Error ? poolErr.message : String(poolErr),
+          });
+        }
+        // If not BonkFun, BC deleted = PumpFun graduated → try Jupiter
+        if (!foundBonkfun && !graduated) {
+          const jupiterPrice = await fetchGraduatedPriceLamports(pos.mint);
+          if (jupiterPrice !== null && jupiterPrice > 0n) {
+            graduated = true;
+            currentPriceLamports = jupiterPrice;
+            logger.info('PumpFun graduated — BC deleted, Jupiter price fetched', {
+              mint: pos.mint,
+              priceLamports: jupiterPrice.toString(),
             });
           }
         }
@@ -396,13 +621,12 @@ export function createDataProvider(
         const jupiterPrice = await fetchGraduatedPriceLamports(pos.mint);
         if (jupiterPrice !== null && jupiterPrice > 0n) {
           currentPriceLamports = jupiterPrice;
-        } else if (prevHighest > 0n) {
-          // Jupiter fetch failed — keep using last known good price so trailing
-          // doesn't get a stale 0 and trigger false stop loss
-          currentPriceLamports = prevHighest;
-          logger.warn('Jupiter price unavailable for graduated token, using last known price', {
+        } else {
+          // Both Jupiter and DexScreener failed — token likely rugged.
+          // Do NOT fall back to prevHighest — let price stay at 0 so SL triggers.
+          logger.error('Graduated token price unavailable from all sources (rug?)', {
             mint: pos.mint,
-            fallbackPrice: prevHighest.toString(),
+            prevHighest: prevHighest.toString(),
           });
         }
       }
@@ -411,7 +635,8 @@ export function createDataProvider(
       // use it. A real price crash to exactly 0 is extremely rare (rug pull
       // still has some residual value). Better to use stale price than trigger
       // a false -100% STOP_LOSS.
-      if (currentPriceLamports === 0n && prevHighest > 0n) {
+      // EXCEPTION: graduated tokens — if price is 0, all sources failed = rug.
+      if (currentPriceLamports === 0n && prevHighest > 0n && !graduated) {
         currentPriceLamports = prevHighest;
         logger.warn('Price resolved to 0 but prevHighest exists — using fallback', {
           mint: pos.mint,
@@ -433,6 +658,7 @@ export function createDataProvider(
         killSwitchActive: !container.killSwitch.isAlive(),
         graduated,
         highestPriceLamports,
+        antiRugTriggered: antiRugTriggeredMints.has(pos.mint),
       };
     },
 

@@ -39,7 +39,7 @@ export interface MomentumSignal extends BaseSignal {
   readonly uniqueSlotCount?: number;
   /** Number of unique wallets with buys in the window. */
   readonly uniqueWalletCount?: number;
-  /** Number of sells in the window (for sell pressure detection). */
+  /** Number of sells in the 60s window (for sell pressure detection). */
   readonly sellCount?: number;
 }
 

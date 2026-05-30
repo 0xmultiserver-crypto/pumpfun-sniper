@@ -211,10 +211,10 @@ export class BundleDetector implements IDetector {
    * Force-analyze a token's bundle state (e.g., at migration or when
    * the caller wants an immediate check). Returns the bundle pct.
    */
-  forceAnalyze(mint: MintAddress): number {
+  forceAnalyze(mint: MintAddress): number | null {
     const state = this.tokenStates.get(mint);
     if (state === undefined || state.buys.length < 1) {
-      return 0;
+      return null; // Insufficient data — can't assess risk
     }
 
     return this.analyzeBundle(mint, state);
@@ -228,9 +228,9 @@ export class BundleDetector implements IDetector {
    * Analyze buys for a mint, identify bundled wallets, and emit signal if threshold met.
    * Returns the computed bundlePct.
    */
-  private analyzeBundle(mint: MintAddress, state: TokenBundleState): number {
+  private analyzeBundle(mint: MintAddress, state: TokenBundleState): number | null {
     const buys = state.buys;
-    if (buys.length < this.minBuyCount) return 0;
+    if (buys.length < this.minBuyCount) return null; // Insufficient data
 
     // Calculate total tokens across all buys
     let totalTokenAmount = 0n;

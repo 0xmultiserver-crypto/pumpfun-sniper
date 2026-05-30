@@ -37,6 +37,7 @@ import { createLogger } from '../../telemetry/logging/logger.js';
 import { nowMs } from '../../core/utils/time.js';
 import type { DynamicPositionSizer } from './positionSizer.js';
 import { DEFAULT_EXIT_MONITOR_POLL_MS } from '../../core/constants/defaults/infrastructure.js';
+import type { RiskStateRepository } from '../../storage/repositories/riskStateRepository.js';
 
 const logger = createLogger('strategy:filteredSniper');
 
@@ -71,6 +72,12 @@ export interface StrategyDataProvider {
   getActivePositionCount(): number;
   /** Check if a token is blacklisted (e.g., after stop-loss exit). */
   isTokenBlacklisted(mint: string): boolean;
+  /** Start anti-rug monitoring for a mint (no-op if disabled). */
+  startAntiRugMonitoring(mint: string): void;
+  /** Stop anti-rug monitoring for a mint and clear triggered flag. */
+  stopAntiRugMonitoring(mint: string): void;
+  /** Transition a position to a new status in the registry. */
+  transitionPosition(tradeId: string, to: string, reason: string): void;
 }
 
 /** Execution delegate — strategy tells what to do, doesn't do it. */
@@ -139,6 +146,8 @@ export class FilteredSniperStrategy implements IStrategy {
 
   /** Active mints being held (prevents double-buy on restart or re-entry). */
   private readonly activeMints = new Set<string>();
+  /** Mints with a buy currently in-flight (prevents same-mint race condition). */
+  private readonly pendingMints = new Set<string>();
   /** Number of buys currently in-flight (between capacity check and registration). */
   private pendingBuyCount = 0;
   /** Track consecutive sell failures per trade to prevent infinite retry. */
@@ -158,6 +167,9 @@ export class FilteredSniperStrategy implements IStrategy {
   private static readonly SIGNAL_QUEUE_TTL_MS = 5 * 60 * 1000; // 5 minutes
   private static readonly SIGNAL_QUEUE_MAX_SIZE = 10;
 
+  /** Risk state repo for persisting scale-out tiers across restarts. */
+  private readonly riskStateRepo: RiskStateRepository | null;
+
   /** Exit monitoring interval handle. */
   private monitorIntervalHandle: ReturnType<typeof setInterval> | null = null;
 
@@ -169,11 +181,13 @@ export class FilteredSniperStrategy implements IStrategy {
     executionDelegate: StrategyExecutionDelegate,
     positionSizer?: DynamicPositionSizer,
     monitorPollMs: number = DEFAULT_EXIT_MONITOR_POLL_MS,
+    riskStateRepo?: RiskStateRepository,
   ) {
     this.dataProvider = dataProvider;
     this.executionDelegate = executionDelegate;
     this.positionSizer = positionSizer ?? null;
     this.monitorPollMs = monitorPollMs;
+    this.riskStateRepo = riskStateRepo ?? null;
   }
 
   // -------------------------------------------------------------------------
@@ -220,6 +234,61 @@ export class FilteredSniperStrategy implements IStrategy {
       this.activeMints.add(mint);
     }
     logger.info('Trade added to exit monitor', { tradeId, mint });
+  }
+
+  /**
+   * Restore completed scale-out tiers for a trade from persisted state.
+   * Called during position recovery after bot restart.
+   */
+  restoreCompletedTiers(tradeId: string, tiers: number[]): void {
+    if (tiers.length > 0) {
+      this.completedScaleOutTiers.set(tradeId, new Set(tiers));
+      logger.info('Restored completed scale-out tiers', { tradeId, tiers });
+    }
+  }
+
+  /**
+   * Persist completed scale-out tiers to risk_state table.
+   * Survives bot restarts.
+   */
+  private async persistCompletedTiers(): Promise<void> {
+    if (!this.riskStateRepo) return;
+    try {
+      const data: Record<string, number[]> = {};
+      for (const [tradeId, tiers] of this.completedScaleOutTiers) {
+        if (tiers.size > 0) {
+          data[tradeId] = [...tiers];
+        }
+      }
+      await this.riskStateRepo.saveState('scale_out_tiers', data);
+    } catch (err: unknown) {
+      logger.warn('Failed to persist scale-out tiers', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Load completed scale-out tiers from risk_state table.
+   * Called on startup.
+   */
+  async loadCompletedTiers(): Promise<void> {
+    if (!this.riskStateRepo) return;
+    try {
+      const data = await this.riskStateRepo.loadState<Record<string, number[]>>('scale_out_tiers');
+      if (data) {
+        for (const [tradeId, tiers] of Object.entries(data)) {
+          this.completedScaleOutTiers.set(tradeId, new Set(tiers));
+        }
+        logger.info('Loaded completed scale-out tiers from DB', {
+          tradeCount: Object.keys(data).length,
+        });
+      }
+    } catch (err: unknown) {
+      logger.warn('Failed to load scale-out tiers', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -283,6 +352,12 @@ export class FilteredSniperStrategy implements IStrategy {
       return null;
     }
 
+    // Guard: check if this mint already has a buy in-flight (prevents same-mint race condition)
+    if (this.pendingMints.has(mint)) {
+      logger.debug('Signal ignored: buy already in-flight for this mint', { mint });
+      return null;
+    }
+
     // Guard: check if token is blacklisted (e.g., after stop-loss exit)
     if (this.dataProvider.isTokenBlacklisted(mint)) {
       logger.info('Signal ignored: token is blacklisted', { mint });
@@ -292,6 +367,7 @@ export class FilteredSniperStrategy implements IStrategy {
     // Reserve slot — increment BEFORE any async to prevent race condition
     // where multiple signals pass capacity check before any buy registers.
     this.pendingBuyCount += 1;
+    this.pendingMints.add(mint);
 
     try {
       const checkData = await this.dataProvider.getEntryCheckData(signal);
@@ -307,6 +383,7 @@ export class FilteredSniperStrategy implements IStrategy {
           firstFailure: decision.firstFailure,
         });
         this.pendingBuyCount -= 1;
+        this.pendingMints.delete(mint);
         return decision;
       }
 
@@ -348,6 +425,9 @@ export class FilteredSniperStrategy implements IStrategy {
         this.monitoredTrades.add(buyResult.tradeId);
         this.activeMints.add(mint);
         this.pendingBuyCount -= 1; // Position now tracked by registry (activeCount)
+        this.pendingMints.delete(mint);
+        // Start anti-rug monitoring for this mint
+        this.dataProvider.startAntiRugMonitoring(mint);
         logger.info('Buy executed, monitoring for exit', {
           mint,
           tradeId: buyResult.tradeId,
@@ -356,6 +436,7 @@ export class FilteredSniperStrategy implements IStrategy {
       } else {
         // Buy failed — release reserved slot
         this.pendingBuyCount -= 1;
+        this.pendingMints.delete(mint);
         if (isExpectedBuyBlock(buyResult.error)) {
           logger.warn('Buy skipped by risk guard', {
             mint,
@@ -373,6 +454,7 @@ export class FilteredSniperStrategy implements IStrategy {
     } catch (err: unknown) {
       // Unexpected error — release reserved slot
       this.pendingBuyCount -= 1;
+      this.pendingMints.delete(mint);
       throw err;
     }
   }
@@ -395,6 +477,7 @@ export class FilteredSniperStrategy implements IStrategy {
       // Trade no longer exists — remove from monitoring
       this.monitoredTrades.delete(tradeId);
       this.completedScaleOutTiers.delete(tradeId);
+      void this.persistCompletedTiers(); // Cleanup persisted state
       // Mint cleanup: we don't know the mint here, but it will be cleaned
       // when the position exit is detected below
       return;
@@ -440,23 +523,49 @@ export class FilteredSniperStrategy implements IStrategy {
         // For SCALE_OUT: record completed tier and re-add to monitoring
         if (exitDecision.reason === 'SCALE_OUT') {
           // Record which tier was just sold so evaluateExit skips it next poll
-          const tierIndex = SCALE_OUT_TIERS.findIndex((t: { sellPct: number }) => t.sellPct === exitDecision.sellPct);
+          const tierIndex = exitDecision.tierIndex ?? -1;
+          let completed = this.completedScaleOutTiers.get(tradeId) ?? new Set<number>();
           if (tierIndex >= 0) {
-            const completed = this.completedScaleOutTiers.get(tradeId) ?? new Set<number>();
             completed.add(tierIndex);
             this.completedScaleOutTiers.set(tradeId, completed);
+            void this.persistCompletedTiers(); // Persist to survive restart
           }
-          this.monitoredTrades.add(tradeId);
-          logger.info('Scale-out partial sell complete, re-monitoring for next tier', {
-            tradeId,
-            sellPct: exitDecision.sellPct,
-            tierIndex,
-          });
+
+          // Check if ALL tiers are completed
+          const tiersNeeded = SCALE_OUT_TIERS.length;
+          if (completed && completed.size >= tiersNeeded) {
+            // All scale-out tiers done — but DON'T mark as full exit yet!
+            // 31.875% of position still rides with trailing stop / SL / TP.
+            // Keep monitoring so trailing stop can lock remaining profits.
+            this.dataProvider.transitionPosition(tradeId, 'EXITED', 'SCALE_OUT_PARTIAL');
+            this.monitoredTrades.add(tradeId);
+            logger.info('All scale-out tiers complete — remaining position rides trailing stop', {
+              tradeId,
+              remainingPct: '31.875%',
+              completedTiers: completed.size,
+              totalTiers: tiersNeeded,
+            });
+          } else {
+            // More tiers remaining — keep monitoring but mark as partially exited
+            // This prevents getActivePositionCount() from blocking new buys
+            this.dataProvider.transitionPosition(tradeId, 'EXITED', 'SCALE_OUT_PARTIAL');
+            this.monitoredTrades.add(tradeId);
+            logger.info('Scale-out partial sell complete, re-monitoring for next tier', {
+              tradeId,
+              sellPct: exitDecision.sellPct,
+              tierIndex,
+              completedTiers: completed?.size ?? 0,
+              totalTiers: tiersNeeded,
+            });
+          }
         } else {
           // Full exit — remove mint from active tracking
           this.activeMints.delete(positionData.mint);
+          // Stop anti-rug monitoring and clear triggered flag
+          this.dataProvider.stopAntiRugMonitoring(positionData.mint);
           this.completedScaleOutTiers.delete(tradeId);
           this.sellFailureCounts.delete(tradeId);
+          void this.persistCompletedTiers(); // Cleanup persisted state
           logger.info('Exit executed successfully', {
             tradeId,
             reason: exitDecision.reason,
@@ -502,34 +611,40 @@ export class FilteredSniperStrategy implements IStrategy {
 
   private startExitMonitor(): void {
     this.monitorIntervalHandle = setInterval(async () => {
-      if (this.state !== 'RUNNING') return;
+      try {
+        if (this.state !== 'RUNNING') return;
 
-      // Process queued signals if a slot is available
-      await this.processSignalQueue();
+        // Process queued signals if a slot is available
+        await this.processSignalQueue();
 
-      if (this.monitoredTrades.size === 0) return;
+        if (this.monitoredTrades.size === 0) return;
 
-      // Evaluate each trade sequentially (bounded by max concurrent positions)
-      for (const tradeId of [...this.monitoredTrades]) {
-        if (!this.monitoredTrades.has(tradeId) || this.exitingTrades.has(tradeId)) {
-          continue;
+        // Evaluate each trade sequentially (bounded by max concurrent positions)
+        for (const tradeId of [...this.monitoredTrades]) {
+          if (!this.monitoredTrades.has(tradeId) || this.exitingTrades.has(tradeId)) {
+            continue;
+          }
+
+          // Stuck position backoff — skip N cycles before retrying sell
+          const skipCount = this.stuckPositionSkipCounts.get(tradeId);
+          if (skipCount !== undefined && skipCount > 0) {
+            this.stuckPositionSkipCounts.set(tradeId, skipCount - 1);
+            continue;
+          }
+
+          try {
+            await this.evaluateTradeExit(tradeId);
+          } catch (err: unknown) {
+            logger.error('Exit monitor error', {
+              tradeId,
+              err: err instanceof Error ? err.message : String(err),
+            });
+          }
         }
-
-        // Stuck position backoff — skip N cycles before retrying sell
-        const skipCount = this.stuckPositionSkipCounts.get(tradeId);
-        if (skipCount !== undefined && skipCount > 0) {
-          this.stuckPositionSkipCounts.set(tradeId, skipCount - 1);
-          continue;
-        }
-
-        try {
-          await this.evaluateTradeExit(tradeId);
-        } catch (err: unknown) {
-          logger.error('Exit monitor error', {
-            tradeId,
-            err: err instanceof Error ? err.message : String(err),
-          });
-        }
+      } catch (err: unknown) {
+        logger.error('Exit monitor top-level error', {
+          err: err instanceof Error ? err.message : String(err),
+        });
       }
     }, this.monitorPollMs);
   }

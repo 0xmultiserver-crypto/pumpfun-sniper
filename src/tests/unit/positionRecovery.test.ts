@@ -40,7 +40,7 @@ describe('restoreOpenPositionsFromDb', () => {
     expect(pos?.entryAmountSol).toBe(1_000_000n);
     expect(pos?.entryAmountTokens).toBe(2_000_000_000n);
     expect(pos?.entryTimestamp).toBe(2_000);
-    expect(pos?.entryPriceSol).toBe(500_000n);
+    expect(pos?.entryPriceSol).toBe(500n);
   });
 
   it('skips open BUY rows with zero token amount', async () => {

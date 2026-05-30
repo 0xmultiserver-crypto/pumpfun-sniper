@@ -22,6 +22,7 @@ function makeRuntime(registry: PositionRegistry): ExecutionRuntime {
       },
       cooldownManager: {
         activateCooldown: () => undefined,
+        activateCooldownForDuration: () => undefined,
       },
       dailyLossGuard: {
         recordTrade: () => undefined,

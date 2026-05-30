@@ -140,9 +140,9 @@ export class WashTradeDetector implements IDetector {
    * Returns 0-100 (higher = more suspicious), or 0 if no data.
    * Unlike getLatestWashScore, this works with as few as 2 trades.
    */
-  forceAnalyze(mint: string): number {
+  forceAnalyze(mint: string): number | null {
     const state = this.tokenStates.get(mint as MintAddress);
-    if (!state || state.trades.length < 2) return 0;
+    if (!state || state.trades.length < 2) return null; // Insufficient data
     const result = this.analyzeWashPattern(state.trades);
     return result.score;
   }

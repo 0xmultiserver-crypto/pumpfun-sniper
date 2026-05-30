@@ -2,14 +2,14 @@
  * Helius Holder Count
  *
  * Fetches the real total holder count for a token using Helius getTokenAccounts API.
- * This replaces getTokenLargestAccounts which only returns top 20.
+ * PAGINATES through all pages to get the real count (total field is per-page, not global).
  *
  * Used by entry check #17 (holder-mcap ratio) to detect coordinated holder inflation.
  *
  * Rate limiting:
- *  - Global max 2 requests per second (Helius free tier: 10 RPS, keep headroom)
+ *  - Global max 2 requests per second
  *  - Per-mint cache: 120 seconds
- *  - Queued requests deduplicated (same mint = 1 API call)
+ *  - Concurrent request deduplication
  */
 
 import { createLogger } from '../telemetry/logging/logger.js';
@@ -21,7 +21,8 @@ const logger = createLogger('app:holderCount');
 // ---------------------------------------------------------------------------
 
 const holderCache = new Map<string, { count: number; timestamp: number }>();
-const CACHE_TTL_MS = 120_000; // 2 minutes — aggressive caching to save RPS
+const CACHE_TTL_MS = 120_000; // 2 minutes
+const MAX_CACHE_SIZE = 1000;
 
 // ---------------------------------------------------------------------------
 // Rate limiter — token bucket, 2 tokens/sec, max burst 2
@@ -60,13 +61,8 @@ const pending = new Map<string, Promise<number | null>>();
 
 /**
  * Get the real total holder count for a token mint via Helius API.
- * Returns the number of token accounts that hold this token.
+ * Paginates through ALL pages to get the true count.
  * Returns null if the API call fails (caller should handle gracefully).
- *
- * Features:
- *  - 2-minute cache per mint
- *  - 2 RPS global rate limit
- *  - Concurrent request deduplication
  */
 export async function getRealHolderCount(
   mint: string,
@@ -90,8 +86,8 @@ export async function getRealHolderCount(
     return cached?.count ?? null;
   }
 
-  // 4. Fetch from Helius
-  const promise = fetchHolderCount(mint, heliusApiKey);
+  // 4. Fetch from Helius (with pagination)
+  const promise = fetchHolderCountPaginated(mint, heliusApiKey);
   pending.set(mint, promise);
 
   try {
@@ -103,55 +99,98 @@ export async function getRealHolderCount(
 }
 
 // ---------------------------------------------------------------------------
-// Internal fetcher
+// Internal fetcher — paginated
 // ---------------------------------------------------------------------------
 
-async function fetchHolderCount(
+async function fetchHolderCountPaginated(
   mint: string,
   heliusApiKey: string,
 ): Promise<number | null> {
+  let totalCount = 0;
+  let cursor: string | undefined;
+  let pages = 0;
+  const MAX_PAGES = 10; // Safety limit — max 10 pages (10k accounts)
+
   try {
-    const url = `https://mainnet.helius-rpc.com/?api-key=${heliusApiKey}`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    while (pages < MAX_PAGES) {
+      // Rate limit per page
+      if (pages > 0) {
+        if (!tryConsumeToken()) {
+          // Rate limited mid-pagination — return what we have so far
+          logger.debug('Rate limited during pagination, returning partial count', {
+            mint: mint.slice(0, 12),
+            partialCount: totalCount,
+            pages,
+          });
+          break;
+        }
+      }
+
+      const url = `https://mainnet.helius-rpc.com/?api-key=${heliusApiKey}`;
+      const body: Record<string, unknown> = {
         jsonrpc: '2.0',
-        id: 1,
+        id: pages + 1,
         method: 'getTokenAccounts',
         params: { mint },
-      }),
-      signal: AbortSignal.timeout(5000),
-    });
-
-    if (!response.ok) {
-      if (response.status === 429) {
-        logger.warn('Helius rate limited (429) — backing off', { mint: mint.slice(0, 12) });
-        // Drain a token to slow down
-        tokens = 0;
-      } else {
-        logger.warn('Helius getTokenAccounts HTTP error', { status: response.status });
+      };
+      if (cursor !== undefined) {
+        body.params = { mint, cursor };
       }
-      return holderCache.get(mint)?.count ?? null;
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (!response.ok) {
+        if (response.status === 429) {
+          logger.warn('Helius rate limited (429) — backing off', { mint: mint.slice(0, 12) });
+          tokens = 0;
+        }
+        break;
+      }
+
+      const data = await response.json() as {
+        result?: { token_accounts?: unknown[]; cursor?: string };
+        error?: unknown;
+      };
+
+      if (data.error) {
+        logger.warn('Helius getTokenAccounts RPC error', { error: data.error });
+        break;
+      }
+
+      const accounts = data.result?.token_accounts ?? [];
+      totalCount += accounts.length;
+      cursor = data.result?.cursor;
+      pages++;
+
+      // No more pages
+      if (cursor === undefined || cursor === '' || accounts.length === 0) {
+        break;
+      }
     }
 
-    const data = await response.json() as { result?: { total?: number }; error?: unknown };
-    if (data.error) {
-      logger.warn('Helius getTokenAccounts RPC error', { error: data.error });
-      return holderCache.get(mint)?.count ?? null;
-    }
-
-    const total = data.result?.total;
-    if (typeof total !== 'number' || total <= 0) {
-      logger.warn('Helius getTokenAccounts invalid total', { total });
+    if (totalCount <= 0) {
+      logger.debug('No holder accounts found', { mint: mint.slice(0, 12) });
       return null;
     }
 
-    // Cache the result
-    holderCache.set(mint, { count: total, timestamp: Date.now() });
-    logger.debug('Real holder count fetched', { mint: mint.slice(0, 12), holders: total });
+    // Cache the result (evict oldest if at capacity)
+    if (holderCache.size >= MAX_CACHE_SIZE) {
+      const oldest = holderCache.keys().next().value;
+      if (oldest) holderCache.delete(oldest);
+    }
+    holderCache.set(mint, { count: totalCount, timestamp: Date.now() });
+    logger.debug('Real holder count fetched', {
+      mint: mint.slice(0, 12),
+      holders: totalCount,
+      pages,
+    });
 
-    return total;
+    return totalCount;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.warn('Failed to fetch real holder count', { mint: mint.slice(0, 12), error: msg });

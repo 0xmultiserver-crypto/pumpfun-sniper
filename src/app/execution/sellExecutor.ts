@@ -15,7 +15,7 @@ import { parseBondingCurveData } from '../../adapters/protocols/pumpfun/tokenPar
 import { SLIPPAGE_BPS } from '../../strategies/filteredSniper/filteredSniperRules.js';
 import { composeSwapInstructions } from '../../execution/tx/txComposer.js';
 import { DEFAULT_PUMPFUN_COMPUTE_BUDGET, buildComputeBudgetInstructions } from '../../execution/tx/computeBudgetBuilder.js';
-import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from '../../core/constants/programs.js';
+import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, MIN_BONKFUN_POOL_STATE_SIZE } from '../../core/constants/programs.js';
 import { GLOBAL_PDA, PUMP_FEE_CONFIG_PDA, toBN } from '../../adapters/protocols/pumpfun/officialPumpSdk.js';
 import { buildOfficialPumpfunBondingCurve, quoteOfficialPumpfunSell } from '../../adapters/protocols/pumpfun/officialPumpfunQuote.js';
 import type { ExecutionRuntime } from './runtime.js';
@@ -25,6 +25,12 @@ import { getConfirmedSellAmountSol } from './onChainAccounting.js';
 import { reclaimSingleAccount } from './rentReclaimer.js';
 
 const logger = createLogger('app:execution:sell');
+
+/** Apply sell percentage to token amount (for partial sells / scale-out). */
+function applySellPct(tokenAmount: bigint, sellPct: number): bigint {
+  if (sellPct >= 100) return tokenAmount;
+  return tokenAmount * BigInt(sellPct) / 100n;
+}
 
 export async function buildPumpfunSellInstructions(params: {
   readonly runtime: ExecutionRuntime;
@@ -123,6 +129,107 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
     const mint = new PublicKey(pos.mint);
     const user = container.signer.getPublicKey();
     const tokenProgram = await getMintTokenProgram(mint);
+
+    // ── Jupiter Sell Helper (shared by PumpFun + BonkFun graduation) ──
+    async function executeJupiterSell(): Promise<SellResult> {
+      logger.info("Routing to Jupiter sell", { tradeId, mint: pos!.mint });
+      const jupiterProvider = new JupiterProvider();
+      const graduatedTokenAmount = await getUserTokenBalance(user, mint, tokenProgram);
+      const partialTokenAmount = applySellPct(graduatedTokenAmount, sellPct);
+      if (partialTokenAmount === 0n) {
+        return { success: false, signature: null, error: 'No token balance in user ATA' };
+      }
+
+      const quote = await jupiterProvider.quote({
+        mint: pos!.mint as MintAddress,
+        direction: 'SELL',
+        amountLamports: partialTokenAmount,
+        slippageBps: SLIPPAGE_BPS,
+      });
+      if (quote === null) {
+        return { success: false, signature: null, error: 'Jupiter quote failed' };
+      }
+
+      const jupiterSwap = await container.jupiterVenue.buildSwap({
+        route: quote,
+        userPublicKey: user.toBase58(),
+      });
+      if (jupiterSwap === null) {
+        return { success: false, signature: null, error: 'Jupiter swap build failed' };
+      }
+
+      const sendResult = await container.sendCoordinator.signAndSend({
+        tradeId: `sell-${tradeId}-${sellSendRunId}-jupiter`,
+        transaction: jupiterSwap.transaction,
+      });
+
+      const signature = sendResult.sendResult?.signature ?? null;
+      let confirmationError = sendResult.error;
+      if (!confirmationError && signature) {
+        logger.info('SELL TX submitted, waiting for confirmation...', { tradeId, signature });
+        confirmationError = await confirmSubmittedTransaction(signature);
+        if (confirmationError) {
+          logger.error('SELL TX FAILED ON-CHAIN', { tradeId, signature, onChainError: confirmationError });
+        } else {
+          logger.info('SELL TX CONFIRMED ON-CHAIN!', { tradeId, signature });
+        }
+      }
+
+      const sellAccounting = !confirmationError && signature
+        ? await getConfirmedSellAmountSol({
+          connection: container.connection,
+          signature,
+          wallet: user,
+          fallbackLamports: quote.expectedOutputAmount,
+          tradeId,
+        })
+        : {
+          amountSolLamports: confirmationError ? 0n : quote.expectedOutputAmount,
+          walletDeltaLamports: confirmationError ? 0n : quote.expectedOutputAmount,
+          feeLamports: 0n, rentPaidLamports: 0n, rentRefundedLamports: 0n,
+        };
+      const amountSol = sellAccounting.amountSolLamports;
+
+      try {
+        await saveTrade(container, {
+          id: `sell-${tradeId}-${sellSendRunId}`,
+          mint: pos!.mint,
+          side: 'SELL',
+          status: confirmationError ? 'FAILED' : 'CONFIRMED',
+          amountSol,
+          amountTokens: partialTokenAmount,
+          signature,
+          slot: null,
+          submittedAt: nowMs(),
+          confirmedAt: confirmationError ? null : nowMs(),
+          failureReason: confirmationError,
+        });
+      } catch (saveErr: unknown) {
+        logger.error('Failed to save Jupiter sell trade', {
+          tradeId, error: saveErr instanceof Error ? saveErr.message : String(saveErr),
+        });
+      }
+
+      if (confirmationError) {
+        return { success: false, signature, error: confirmationError };
+      }
+
+      positionRegistry.transition(tradeId, 'EXITED', params.reason);
+      reclaimSingleAccount({ connection: container.connection, mint, owner: user, tokenProgram, txBuilder: container.txBuilder, sendCoordinator: container.sendCoordinator })
+        .catch((err: unknown) => { logger.warn('Post-sell rent reclaim failed', { tradeId, error: err instanceof Error ? err.message : String(err) }); });
+
+      try {
+        const entrySolLamports = pos!.entryAmountSol ?? 0n;
+        const solPriceUsd = await container.solPriceOracle.getSolPriceUsd();
+        const pnlUsd = Number(amountSol - entrySolLamports) / 1e9 * solPriceUsd;
+        recordPnlAndRisk(container, pnlUsd, params.reason, tradeId, pos!.mint);
+      } catch (pnlErr: unknown) {
+        logger.error('P&L recording failed (Jupiter) — activating cooldown anyway', { tradeId, error: pnlErr instanceof Error ? pnlErr.message : String(pnlErr) });
+        container.cooldownManager.activateCooldown();
+      }
+
+      return { success: true, signature: sendResult.sendResult?.signature ?? null, error: null };
+    }
     let tokenAmount = await getUserTokenBalance(user, mint, tokenProgram);
     if (tokenAmount === 0n) {
       logger.warn('No live token balance — closing stale open position without sending SELL', {
@@ -153,9 +260,189 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
       return { success: true, signature: null, error: null };
     }
 
-    // ── Fetch Bonding Curve State ─────────────────────────────────
+    // ── Venue Detection: BonkFun vs PumpFun ──────────────────────
+    // Check if this token is a BonkFun (Raydium LaunchLab) token first.
+    // If pool state PDA exists with BonkFun platform config → route to BonkFun sell.
+    // Otherwise → fall through to PumpFun bonding curve flow.
+    const { derivePoolStatePDA: deriveBonkfunPoolPDA } = await import('../../adapters/protocols/bonkfun/shared.js');
+    const { parsePoolStateData, isBonkfunToken } = await import('../../adapters/protocols/bonkfun/tokenParser.js');
+
+    const bonkfunPoolPDA = deriveBonkfunPoolPDA(mint);
+    const bonkfunPoolAccount = await container.connection.getAccountInfo(bonkfunPoolPDA);
+    let bonkfunGraduated = false;
+
+    if (bonkfunPoolAccount?.data && bonkfunPoolAccount.data.length >= MIN_BONKFUN_POOL_STATE_SIZE) {
+      const parsedPool = parsePoolStateData(Buffer.from(bonkfunPoolAccount.data), mint.toBase58());
+      if (parsedPool && isBonkfunToken(parsedPool)) {
+        logger.info('BonkFun token detected — routing to BonkFun sell', { tradeId, mint: pos.mint });
+
+        // Apply sellPct for partial sells (scale-out)
+        const bonkfunTokenAmount = applySellPct(tokenAmount, sellPct);
+
+        const { buildBonkfunSellInstructions } = await import('./bonkfunSellExecutor.js');
+        const bonkfunResult = await buildBonkfunSellInstructions({
+          runtime,
+          mint,
+          user,
+          tokenAmount: bonkfunTokenAmount,
+          slippageBps: params.slippageBps,
+        });
+
+        if (!bonkfunResult) {
+          return { success: false, signature: null, error: 'Failed to build BonkFun sell instructions (pool graduated or invalid)' };
+        }
+
+        // Execute BonkFun sell with retry logic
+        let bonkfunSellConfirmed = false;
+        let bonkfunSignature: string | null = null;
+        let bonkfunLastError: string | null = null;
+
+        for (let attempt = 0; attempt <= MAX_TX_RETRIES; attempt++) {
+          // Check if pool graduated mid-retry — re-route to Jupiter
+          if (attempt > 0) {
+            try {
+              const recheckPool = await container.connection.getAccountInfo(bonkfunPoolPDA);
+              if (recheckPool?.data) {
+                const recheckParsed = parsePoolStateData(Buffer.from(recheckPool.data), mint.toBase58());
+                if (recheckParsed?.complete) {
+                  logger.info('BonkFun pool graduated during sell retry — falling through to Jupiter', { tradeId, attempt });
+                  bonkfunGraduated = true;
+                  break; // Fall through to PumpFun/Jupiter path below
+                }
+              }
+            } catch {}
+          }
+
+          logger.info('BonkFun sell attempt', { tradeId, attempt, minSolOut: bonkfunResult.minSolOutput.toString() });
+
+          const txResult = await container.txBuilder.build({
+            feePayer: user,
+            instructions: bonkfunResult.instructions,
+          });
+
+          const sendResult = await container.sendCoordinator.signAndSend({
+            tradeId: `bonkfun-sell-${tradeId}-${sellSendRunId}-attempt-${attempt}`,
+            transaction: txResult.transaction,
+          });
+
+          bonkfunSignature = sendResult.sendResult?.signature ?? bonkfunSignature;
+          bonkfunLastError = sendResult.error ?? null;
+
+          if (!bonkfunLastError && bonkfunSignature) {
+            const confirmError = await confirmSubmittedTransaction(
+              bonkfunSignature,
+              txResult.blockhash,
+              txResult.lastValidBlockHeight,
+            );
+            if (!confirmError) {
+              bonkfunSellConfirmed = true;
+              break;
+            }
+            bonkfunLastError = confirmError;
+          }
+
+          if (attempt < MAX_TX_RETRIES) {
+            await delay(RETRY_DELAY_MS);
+          }
+        }
+
+        if (bonkfunSellConfirmed && bonkfunSignature) {
+          logger.info('BonkFun SELL confirmed', { tradeId, signature: bonkfunSignature });
+
+          // Get confirmed on-chain amount BEFORE saving to DB
+          let confirmedSol = bonkfunResult.expectedSolOutput;
+          try {
+            const accounting = await getConfirmedSellAmountSol({
+              connection: container.connection,
+              signature: bonkfunSignature,
+              wallet: user,
+              fallbackLamports: bonkfunResult.expectedSolOutput,
+              tradeId,
+            });
+            confirmedSol = accounting.amountSolLamports;
+          } catch {
+            logger.warn('BonkFun on-chain sell accounting failed — using estimate', { tradeId });
+          }
+
+          // Record trade in DB with confirmed amounts
+          try {
+            await saveTrade(container, {
+              id: `sell-${tradeId}-${sellSendRunId}` as any,
+              mint: pos.mint,
+              side: 'SELL' as any,
+              status: 'CONFIRMED' as any,
+              amountSol: confirmedSol,
+              amountTokens: bonkfunTokenAmount,
+              signature: bonkfunSignature,
+              slot: null,
+              submittedAt: Date.now(),
+              confirmedAt: Date.now(),
+              failureReason: null,
+            });
+          } catch (saveErr: unknown) {
+            logger.error('Failed to save BonkFun sell trade', {
+              tradeId,
+              error: saveErr instanceof Error ? saveErr.message : String(saveErr),
+            });
+          }
+
+          // Record PnL and activate cooldown
+          try {
+            const entrySolLamports = pos.entryAmountSol ?? 0n;
+            const solPriceUsd = await container.solPriceOracle.getSolPriceUsd();
+            const pnlUsd = Number(confirmedSol - entrySolLamports) / 1e9 * solPriceUsd;
+            recordPnlAndRisk(container, pnlUsd, params.reason, tradeId, pos.mint);
+          } catch (pnlErr: unknown) {
+            logger.error('BonkFun PnL recording failed — activating cooldown anyway', {
+              tradeId,
+              error: pnlErr instanceof Error ? pnlErr.message : String(pnlErr),
+            });
+            container.cooldownManager.activateCooldown();
+          }
+
+          positionRegistry.transition(tradeId, 'EXITED', params.reason);
+
+          // Fire-and-forget: reclaim rent from empty token account
+          reclaimSingleAccount({
+            connection: container.connection,
+            mint,
+            owner: user,
+            tokenProgram,
+            txBuilder: container.txBuilder,
+            sendCoordinator: container.sendCoordinator,
+          }).catch((err: unknown) => {
+            logger.warn('BonkFun post-sell rent reclaim failed (non-blocking)', {
+              tradeId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+
+          return { success: true, signature: bonkfunSignature, error: null };
+        } else if (!bonkfunGraduated) {
+          // BonkFun sell failed (NOT due to graduation) — return failure
+          logger.error('BonkFun SELL failed after all retries', {
+            tradeId,
+            lastError: bonkfunLastError,
+            signature: bonkfunSignature,
+          });
+          container.cooldownManager.activateCooldown();
+          return { success: false, signature: bonkfunSignature, error: bonkfunLastError ?? 'BonkFun sell failed' };
+        }
+        // bonkfunGraduated === true → fall through to Jupiter path below
+        logger.info('BonkFun graduated — falling through to Jupiter sell path', { tradeId });
+      }
+    }
+
+    // ── Fetch Bonding Curve State (PumpFun path) ─────────────────
     const bcPDA = deriveBondingCurvePDA(mint);
     const bcAccount = await container.connection.getAccountInfo(bcPDA);
+
+    // For BonkFun-graduated tokens: bonding curve doesn't exist.
+    // Route directly to Jupiter sell (same path as PumpFun graduation).
+    if (bonkfunGraduated && (!bcAccount?.data || bcAccount.data.length < 49)) {
+      logger.info('BonkFun graduated — no bonding curve, routing to Jupiter', { tradeId });
+      return executeJupiterSell();
+    }
 
     let minSolOutput = 0n;
     let expectedSolOutput = 0n;
@@ -187,149 +474,7 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
       if (state.complete) {
         // Token has graduated → use Jupiter for sell
         logger.info('Token graduated — routing to Jupiter', { tradeId, mint: pos.mint });
-
-        const jupiterProvider = new JupiterProvider();
-
-        const graduatedTokenAmount = await getUserTokenBalance(user, mint, tokenProgram);
-        const partialTokenAmount = sellPct < 100
-          ? graduatedTokenAmount * BigInt(sellPct) / 100n
-          : graduatedTokenAmount;
-        if (partialTokenAmount === 0n) {
-          logger.error('No token balance in user ATA — cannot sell graduated token', { tradeId });
-          return { success: false, signature: null, error: 'No token balance in user ATA' };
-        }
-
-        // Get Jupiter quote
-        const quote = await jupiterProvider.quote({
-          mint: pos.mint as MintAddress,
-          direction: 'SELL',
-          amountLamports: partialTokenAmount,
-          slippageBps: SLIPPAGE_BPS,
-        });
-
-        if (quote === null) {
-          logger.error('Jupiter quote failed — cannot sell graduated token', { tradeId });
-          return { success: false, signature: null, error: 'Jupiter quote failed' };
-        }
-
-        // Build swap via JupiterVenue (returns pre-built VersionedTransaction)
-        const jupiterSwap = await container.jupiterVenue.buildSwap({
-          route: quote,
-          userPublicKey: user.toBase58(),
-        });
-
-        if (jupiterSwap === null) {
-          logger.error('Jupiter swap build failed', { tradeId });
-          return { success: false, signature: null, error: 'Jupiter swap build failed' };
-        }
-
-        // Send directly — JupiterVenue already returns a VersionedTransaction
-        const sendResult = await container.sendCoordinator.signAndSend({
-          tradeId: `sell-${tradeId}-${sellSendRunId}-jupiter`,
-          transaction: jupiterSwap.transaction,
-        });
-
-        // Save sell trade to DB only after RPC send + on-chain confirmation.
-        // sendCoordinator returning a signature does NOT prove the tx succeeded.
-        const signature = sendResult.sendResult?.signature ?? null;
-        let confirmationError = sendResult.error;
-        if (!confirmationError && signature) {
-          logger.info('SELL TX submitted, waiting for confirmation...', { tradeId, signature });
-          confirmationError = await confirmSubmittedTransaction(signature);
-          if (confirmationError) {
-            logger.error('SELL TX FAILED ON-CHAIN', { tradeId, signature, onChainError: confirmationError });
-          } else {
-            logger.info('SELL TX CONFIRMED ON-CHAIN!', { tradeId, signature });
-          }
-        }
-
-        // Use confirmed transaction meta for actual gross sell proceeds. The
-        // Jupiter quote is only a fallback when RPC cannot return tx meta.
-        const sellAccounting = !confirmationError && signature
-          ? await getConfirmedSellAmountSol({
-            connection: container.connection,
-            signature,
-            wallet: user,
-            fallbackLamports: quote.expectedOutputAmount,
-            tradeId,
-          })
-          : {
-            amountSolLamports: confirmationError ? 0n : quote.expectedOutputAmount,
-            walletDeltaLamports: confirmationError ? 0n : quote.expectedOutputAmount,
-            feeLamports: 0n,
-            rentPaidLamports: 0n,
-            rentRefundedLamports: 0n,
-          };
-        const amountSol = sellAccounting.amountSolLamports;
-        logger.info('SELL on-chain accounting resolved', {
-          tradeId,
-          amountSolLamports: amountSol.toString(),
-          walletDeltaLamports: sellAccounting.walletDeltaLamports.toString(),
-          feeLamports: sellAccounting.feeLamports.toString(),
-          rentPaidLamports: sellAccounting.rentPaidLamports.toString(),
-          rentRefundedLamports: sellAccounting.rentRefundedLamports.toString(),
-        });
-        await saveTrade(container, {
-          id: `sell-${tradeId}`,
-          mint: pos.mint,
-          side: 'SELL',
-          status: confirmationError ? 'FAILED' : 'CONFIRMED',
-          amountSol,
-          amountTokens: partialTokenAmount,
-          signature,
-          slot: null,
-          submittedAt: nowMs(),
-          confirmedAt: confirmationError ? null : nowMs(),
-          failureReason: confirmationError,
-        });
-
-        // Issue 3 fix: Only untrack position AFTER confirmed on-chain success.
-        if (confirmationError) {
-          return { success: false, signature, error: confirmationError };
-        }
-
-        // Untrack position (only on confirmed success)
-        positionRegistry.transition(tradeId, 'EXITED', params.reason);
-        logger.info('Position untracked', { tradeId });
-
-        // Fire-and-forget: reclaim rent from empty token account
-        reclaimSingleAccount({
-          connection: container.connection,
-          mint,
-          owner: user,
-          tokenProgram,
-          txBuilder: container.txBuilder,
-          sendCoordinator: container.sendCoordinator,
-        }).catch((err: unknown) => {
-          logger.warn('Post-sell rent reclaim failed (non-blocking)', {
-            tradeId,
-            mint: pos.mint,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        });
-
-        // Issue 4 fix: Calculate actual P&L from entry/exit SOL amounts
-        // CRITICAL: cooldown MUST activate even if P&L calc throws
-        try {
-          const entrySolLamports = pos.entryAmountSol ?? 0n;
-          const exitSolLamports = amountSol;
-          const solPriceUsd = await container.solPriceOracle.getSolPriceUsd();
-          const pnlUsd = Number(exitSolLamports - entrySolLamports) / 1e9 * solPriceUsd;
-          recordPnlAndRisk(container, pnlUsd, params.reason, tradeId, pos.mint);
-        } catch (pnlErr: unknown) {
-          logger.error('P&L recording failed (Jupiter) — activating cooldown anyway', {
-            tradeId,
-            reason: params.reason,
-            error: pnlErr instanceof Error ? pnlErr.message : String(pnlErr),
-          });
-          container.cooldownManager.activateCooldown();
-        }
-
-        return {
-          success: true,
-          signature: sendResult.sendResult?.signature ?? null,
-          error: null,
-        };
+        return executeJupiterSell();
       }
 
       // ── Bonding Curve Sell (not graduated) ──────────────────────
@@ -372,10 +517,10 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
       buybackFeeRecipient = sellQuote.feeAccounts.buybackFeeRecipient;
     }
 
-    if (!creator) {
+    if (!creator && !bonkfunGraduated) {
       return { success: false, signature: null, error: 'Bonding curve account missing or creator unavailable' };
     }
-    const sellCreator = creator;
+    const sellCreator = creator!;
 
     // ── Build & Send Pumpfun Sell TX ──────────────────────────────
     // Sell needs the same confirmation/retry discipline as buy. A signature
@@ -544,7 +689,7 @@ export async function executeSell(params: SellParams, runtime: ExecutionRuntime)
     // leaving the position ENTERED forever.
     try {
       await saveTrade(container, {
-        id: `sell-${tradeId}`,
+        id: `sell-${tradeId}-${sellSendRunId}`,
         mint: pos.mint,
         side: 'SELL',
         status: sellConfirmed ? 'CONFIRMED' : 'FAILED',

@@ -20,9 +20,9 @@ describe('CooldownManager', () => {
     expect(result.reason).toBeNull();
   });
 
-  it('uses locked default 120s (2min) cooldown', () => {
+  it('uses locked default 10s cooldown', () => {
     const cm = new CooldownManager();
-    expect(cm.getCooldownMs()).toBe(120_000);
+    expect(cm.getCooldownMs()).toBe(10_000);
   });
 
   it('blocks trading after activateCooldown()', () => {
@@ -49,18 +49,18 @@ describe('CooldownManager', () => {
 
     expect(cm.canTrade().allowed).toBe(false);
 
-    // Advance 2 minutes + 1ms
-    vi.advanceTimersByTime(120_001);
+    // Advance 10s + 1ms
+    vi.advanceTimersByTime(10_001);
 
     expect(cm.canTrade().allowed).toBe(true);
     expect(cm.isActive()).toBe(false);
   });
 
-  it('still blocked at 1min 59s', () => {
+  it('still blocked at 9s', () => {
     const cm = new CooldownManager();
     cm.activateCooldown();
 
-    vi.advanceTimersByTime(119_000); // 1min 59s
+    vi.advanceTimersByTime(9_000); // 9s
 
     expect(cm.canTrade().allowed).toBe(false);
   });
@@ -91,14 +91,14 @@ describe('CooldownManager', () => {
     const cm = new CooldownManager();
     cm.activateCooldown();
 
-    vi.advanceTimersByTime(60_000); // 1 min
+    vi.advanceTimersByTime(5_000); // 5s
 
-    cm.activateCooldown(); // re-activate — should reset to 2 min from now
+    cm.activateCooldown(); // re-activate — should reset to 10s from now
 
-    vi.advanceTimersByTime(60_000); // another 1 min (2 min from start, 1 from re-activate)
+    vi.advanceTimersByTime(5_000); // another 5s (10s from start, 5s from re-activate)
     expect(cm.canTrade().allowed).toBe(false); // still in cooldown
 
-    vi.advanceTimersByTime(60_001); // total 2min + 1ms from re-activate
+    vi.advanceTimersByTime(5_001); // total 10s + 1ms from re-activate
     expect(cm.canTrade().allowed).toBe(true);
   });
 });

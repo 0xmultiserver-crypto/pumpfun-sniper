@@ -54,7 +54,7 @@ import {
  *   9. momentum threshold met
  *  10. price impact acceptable
  */
-export const ENTRY_CHECK_COUNT = 18;
+export const ENTRY_CHECK_COUNT = 19;
 
 /** Price impact rule: max price impact in basis points. LOCKED. */
 export const MAX_PRICE_IMPACT_BPS = DEFAULT_MAX_PRICE_IMPACT_BPS;
@@ -123,7 +123,7 @@ export const TIMEOUT_MS = TIMEOUT_SECONDS * 1000;
 // ---------------------------------------------------------------------------
 
 /** Entry venue: ALWAYS Pump.fun bonding curve. LOCKED. */
-export const ENTRY_VENUE = 'PUMPFUN' as const;
+export const ENTRY_VENUE = 'PUMPFUN' as const; // Note: execution layer does its own venue detection for BonkFun
 
 /** Max concurrent positions. LOCKED. */
 export const MAX_CONCURRENT_POSITIONS = DEFAULT_MAX_CONCURRENT_POSITIONS;
@@ -140,3 +140,35 @@ export const SCALE_OUT_ENABLED = DEFAULT_SCALE_OUT_ENABLED;
 
 /** Scale-out tier definitions. LOCKED. */
 export const SCALE_OUT_TIERS = DEFAULT_SCALE_OUT_TIERS;
+
+// ---------------------------------------------------------------------------
+// Entry Check Thresholds (LOCKED)
+// ---------------------------------------------------------------------------
+
+/** Check 3: Minimum creator score to pass (0-100). */
+export const MIN_CREATOR_SCORE = 45;
+
+/** Check 11: Maximum bundle percentage (0-100). */
+export const MAX_BUNDLE_PCT = 30;
+
+/** Check 12: Maximum wash trade score (0-100). */
+export const MAX_WASH_TRADE_SCORE = 60;
+
+/** Check 13: Minimum unique wallets in momentum window. */
+export const MIN_UNIQUE_WALLETS = 12;
+
+/** Check 14: Maximum sell ratio (sells as % of total trades). */
+export const MAX_SELL_RATIO_PCT = 60;
+
+/** Check 15: Minimum real SOL reserves in bonding curve (lamports). */
+export const MIN_LIQUIDITY_DEPTH_LAMPORTS = 500_000_000n; // 0.5 SOL
+
+/** Check 16: Holder-bundle ratio — max bundle % when holder count is low. */
+export const HOLDER_BUNDLE_MAX_BUNDLE_PCT = 20;
+export const HOLDER_BUNDLE_MAX_HOLDERS = 100;
+
+/** Check 17: Maximum holder-to-market-cap ratio. */
+export const MAX_HOLDER_MCAP_RATIO = 0.015;
+
+/** Check 18: Maximum volume-to-market-cap ratio. */
+export const MAX_VOLUME_MCAP_RATIO = 5;

@@ -12,17 +12,17 @@
 // Position sizing
 // ---------------------------------------------------------------------------
 
-/** Position sizing — base $1.20 equivalent (dynamic sizing center point) */
-export const DEFAULT_POSITION_SIZE_USD = 1.2 as const;
+/** Position sizing — base $0.30 equivalent (used directly by strategy) */
+export const DEFAULT_POSITION_SIZE_USD = 0.3 as const;
 
-/** Dynamic position sizing — minimum $0.10 */
-export const DEFAULT_MIN_POSITION_SIZE_USD = 0.1 as const;
+/** Dynamic position sizing — minimum $0.30 */
+export const DEFAULT_MIN_POSITION_SIZE_USD = 0.3 as const;
 
-/** Dynamic position sizing — maximum $5.00 */
-export const DEFAULT_MAX_POSITION_SIZE_USD = 5 as const;
+/** Dynamic position sizing — maximum $0.30 */
+export const DEFAULT_MAX_POSITION_SIZE_USD = 0.3 as const;
 
-/** Dynamic position sizing — base (center) $0.10 */
-export const DEFAULT_BASE_POSITION_SIZE_USD = 0.1 as const;
+/** Dynamic position sizing — base (center) $0.30 */
+export const DEFAULT_BASE_POSITION_SIZE_USD = 0.3 as const;
 
 // ---------------------------------------------------------------------------
 // Take profit / Stop loss / Trailing
@@ -31,8 +31,8 @@ export const DEFAULT_BASE_POSITION_SIZE_USD = 0.1 as const;
 /** Take profit — LOCKED: +1500% */
 export const DEFAULT_TAKE_PROFIT_PCT = 1500 as const;
 
-/** Stop loss — LOCKED: -80% */
-export const DEFAULT_STOP_LOSS_PCT = 80 as const;
+/** Stop loss — LOCKED: -60% */
+export const DEFAULT_STOP_LOSS_PCT = 60 as const;
 
 /** Trailing stop — activates after this % profit from entry. 0 = always active. */
 export const DEFAULT_TRAILING_ACTIVATION_PCT = 100 as const;
@@ -47,8 +47,8 @@ export const DEFAULT_TRAILING_STOP_PCT = 50 as const;
 /** Timeout — LOCKED: 6 hours (21600 seconds) */
 export const DEFAULT_TIMEOUT_SECONDS = 21600 as const;
 
-/** Max concurrent positions — LOCKED: 2 */
-export const DEFAULT_MAX_CONCURRENT_POSITIONS = 2 as const;
+/** Max concurrent positions — LOCKED: 1 */
+export const DEFAULT_MAX_CONCURRENT_POSITIONS = 1 as const;
 
 // ---------------------------------------------------------------------------
 // Slippage & price impact
@@ -77,6 +77,7 @@ export const DEFAULT_SCALE_OUT_ENABLED = true as const;
  *   Remaining rides with trailing stop.
  */
 export const DEFAULT_SCALE_OUT_TIERS: ReadonlyArray<{ readonly triggerPct: number; readonly sellPct: number }> = [
-  { triggerPct: 100, sellPct: 50 },
-  { triggerPct: 500, sellPct: 25 },
+  { triggerPct: 100, sellPct: 50 },   // +100% → sell 50%
+  { triggerPct: 300, sellPct: 25 },   // +300% → sell 25% (NEW)
+  { triggerPct: 500, sellPct: 15 },   // +500% → sell 15%
 ] as const;

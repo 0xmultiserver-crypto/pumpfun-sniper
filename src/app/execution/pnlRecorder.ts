@@ -37,7 +37,11 @@ export function recordPnlAndRisk(
   // for SL/TIMEOUT/TRAILING which meant GRADUATED, KILL_SWITCH, ANTI_RUG
   // exits had zero cooldown → bot immediately FOMO-bought the next token.
   if (reason !== 'SCALE_OUT') {
-    container.cooldownManager.activateCooldown();
-    logger.info('Cooldown activated after exit', { tradeId, reason, pnlUsd: pnlUsd.toFixed(4) });
+    // Loss exits (SL/TIMEOUT/TRAILING/ANTI_RUG): 120s cooldown
+    // Win exits (TP/GRADUATED/MANUAL/etc.): 30s cooldown
+    const isLoss = wasStopLoss || reason === 'ANTI_RUG';
+    const cooldownSeconds = isLoss ? 120 : 30;
+    container.cooldownManager.activateCooldownForDuration(cooldownSeconds);
+    logger.info('Cooldown activated after exit', { tradeId, reason, cooldownSeconds, pnlUsd: pnlUsd.toFixed(4) });
   }
 }

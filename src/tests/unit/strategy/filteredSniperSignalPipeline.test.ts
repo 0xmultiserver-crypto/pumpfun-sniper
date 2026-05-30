@@ -88,13 +88,15 @@ function passingEntryData(overrides: Partial<EntryCheckData> = {}): EntryCheckDa
     buyCountInWindow: MOMENTUM_MIN_BUYS,
     volumeLamports: MOMENTUM_MIN_VOLUME_LAMPORTS,
     windowMs: MOMENTUM_WINDOW_MS,
-    priceImpactBps: null,
+    priceImpactBps: 100, // 1% — within limit
     bundlePct: 10,
     washTradeScore: 20,
     uniqueWallets: 15,
     sellCountInWindow: 3,
     realSolReservesLamports: 1_000_000_000n,
     holderCount: 50,
+    marketCapUsd: 50000,
+    volumeUsd: 5000,
     ...overrides,
   };
 }
@@ -118,6 +120,9 @@ class RecordingProvider implements StrategyDataProvider {
   isTokenBlacklisted(_mint: string): boolean {
     return false;
   }
+
+  startAntiRugMonitoring(_mint: string): void {}
+  stopAntiRugMonitoring(_mint: string): void {}
 }
 
 class RecordingExecutor implements StrategyExecutionDelegate {

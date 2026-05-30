@@ -30,6 +30,7 @@ import { BundleDetector } from './detectors/bundle/bundleDetector.js';
 import { WashTradeDetector } from './detectors/washTrade/washTradeDetector.js';
 import { DexPaidDetector } from './detectors/dexPaid/dexPaidDetector.js';
 import { RevokeAnalyzer } from './detectors/revoke/revokeAnalyzer.js';
+import { AntiRugMonitor } from './risk/controls/antiRug.js';
 import { SmartMoneyDetector } from './detectors/smartMoney/smartMoneyDetector.js';
 import { CabalDetector } from './detectors/cabal/cabalDetector.js';
 import { ConcentrationAnalyzer } from './detectors/holderConcentration/concentrationAnalyzer.js';
@@ -41,7 +42,7 @@ import { EventNormalizer } from './ingestion/pipeline/eventNormalizer.js';
 import type { PositionProvider } from './risk/exposure/maxExposureGuard.js';
 import { createLogger } from './telemetry/logging/logger.js';
 import { startMetricsServer } from './telemetry/metrics/httpServer.js';
-import { PUMPFUN_PROGRAM_ID } from './core/constants/programs.js';
+import { PUMPFUN_PROGRAM_ID, RAYDIUM_LAUNCHLAB_PROGRAM_ID } from './core/constants/programs.js';
 import { nowMs } from './core/utils/time.js';
 import { generateId } from './core/utils/serialization.js';
 import { WsManager } from './app/wsManager.js';
@@ -161,10 +162,25 @@ async function main(): Promise<void> {
     minTradeCount: 10,
   });
 
-  // Create dataProvider now that detectors exist (needs bundle + wash data)
-  dataProvider = createDataProvider(container, positionRegistry, { bundleDetector, washTradeDetector });
-  strategy = new FilteredSniperStrategy(dataProvider, executionDelegate);
+  // New analytics-only detectors (Phase 3.3–5.3) — declared early for dataProvider
+  const dexPaidDetector = new DexPaidDetector();
+  const rpcClient = container.rpcPool.getBest()!;
+  const revokeAnalyzer = new RevokeAnalyzer(rpcClient);
+  const smartMoneyDetector = new SmartMoneyDetector();
+  const cabalDetector = new CabalDetector();
+  const concentrationAnalyzer = new ConcentrationAnalyzer();
+  const dayPhaseDetector = new DayPhaseDetector();
+  const candleAnalyzer = new CandleAnalyzer();
+  const compoundManager = new CompoundManager();
+
+  // Create dataProvider now that detectors exist (needs bundle + wash + smartMoney data)
+  const antiRugMonitor = new AntiRugMonitor(container.connection);
+  dataProvider = createDataProvider(container, positionRegistry, { bundleDetector, washTradeDetector, smartMoneyDetector }, antiRugMonitor);
+  strategy = new FilteredSniperStrategy(dataProvider, executionDelegate, undefined, undefined, container.riskStateRepository);
   container.setStrategy(strategy);
+
+  // Load persisted scale-out tiers from DB
+  await strategy.loadCompletedTiers();
 
   // Position recovery (AFTER strategy creation — needs strategy.monitorTrade)
   const recoveryResult = await restoreOpenPositionsFromDb({
@@ -177,17 +193,6 @@ async function main(): Promise<void> {
     restored: recoveryResult.restored,
     skipped: recoveryResult.skipped,
   });
-
-  // New analytics-only detectors (Phase 3.3–5.3)
-  const dexPaidDetector = new DexPaidDetector();
-  const rpcClient = container.rpcPool.getBest()!;
-  const revokeAnalyzer = new RevokeAnalyzer(rpcClient);
-  const smartMoneyDetector = new SmartMoneyDetector();
-  const cabalDetector = new CabalDetector();
-  const concentrationAnalyzer = new ConcentrationAnalyzer();
-  const dayPhaseDetector = new DayPhaseDetector();
-  const candleAnalyzer = new CandleAnalyzer();
-  const compoundManager = new CompoundManager();
 
   // Wire detector signal handlers → strategy.onSignal() + save to DB
   launchDetector.onSignal((signal) => {
@@ -421,15 +426,16 @@ async function main(): Promise<void> {
   const wsManager = new WsManager({
     url: wsUrl,
     onOpen: () => {
+      // Subscribe to Pump.fun program logs
       logger.info('Subscribing to pump.fun program logs...');
       wsManager.send(JSON.stringify({
         jsonrpc: '2.0', id: 1, method: 'logsSubscribe',
         params: [{ mentions: [PUMPFUN_PROGRAM_ID.toBase58()] }, { commitment: 'confirmed' }],
       }));
-      logger.info('Subscription sent');
+      logger.info('PumpFun subscription sent');
     },
     onMessage: (raw: Buffer) => {
-      handleWsMessage(raw.toString(), normalizer, dispatcher);
+      void handleWsMessage(raw.toString(), normalizer, dispatcher, container.connection, 'pumpfun');
     },
     onFatal: () => {
       logger.fatal('WebSocket connection lost permanently — shutting down');
@@ -437,7 +443,27 @@ async function main(): Promise<void> {
     },
   });
 
-  await wsManager.connect();
+  // Separate WS connection for LaunchLab/BonkFun
+  // Helius may silently drop a second logsSubscribe on the same connection
+  const launchLabWsManager = new WsManager({
+    url: wsUrl,
+    onOpen: () => {
+      logger.info('Subscribing to LaunchLab program logs (BonkFun) — separate connection...');
+      launchLabWsManager.send(JSON.stringify({
+        jsonrpc: '2.0', id: 2, method: 'logsSubscribe',
+        params: [{ mentions: [RAYDIUM_LAUNCHLAB_PROGRAM_ID.toBase58()] }, { commitment: 'confirmed' }],
+      }));
+      logger.info('LaunchLab subscription sent');
+    },
+    onMessage: (raw: Buffer) => {
+      void handleWsMessage(raw.toString(), normalizer, dispatcher, container.connection, 'launchlab');
+    },
+    onFatal: () => {
+      logger.error('LaunchLab WebSocket connection lost — will NOT shutdown, PumpFun still running');
+    },
+  });
+
+  await Promise.all([wsManager.connect(), launchLabWsManager.connect()]);
 
   // Step 7: Strategy is already running before the WebSocket connection opens.
 

@@ -73,7 +73,23 @@ export class PositionReconciler {
 
         if (!hasBalance) {
           // Token is gone from wallet but DB says OPEN
-          // Record a SELL to close the gap
+          // Check if sell executor already saved a record (race condition guard)
+          const existingSell = await container.tradeRepository.findById(`sell-${trade.id}`);
+          if (existingSell && existingSell.status === 'CONFIRMED' && existingSell.signature) {
+            // Sell executor already recorded this — don't overwrite with null
+            logger.info('Reconciler skipped — sell executor already recorded', {
+              tradeId: trade.id,
+              mint: trade.mint,
+              existingSignature: existingSell.signature,
+            });
+            // Still remove from position registry
+            const pos = positionRegistry.get(trade.id);
+            if (pos) {
+              positionRegistry.transition(trade.id, 'EXITED', 'RECONCILED');
+            }
+            continue;
+          }
+
           logger.warn('Reconciling stale position — token gone from wallet', {
             tradeId: trade.id,
             mint: trade.mint,
@@ -98,6 +114,20 @@ export class PositionReconciler {
           const pos = positionRegistry.get(trade.id);
           if (pos) {
             positionRegistry.transition(trade.id, 'EXITED', 'RECONCILED');
+
+            // Record PnL (loss) and activate cooldown — prevents immediate re-buy
+            try {
+              const entrySolLamports = pos.entryAmountSol ?? 0n;
+              const solPriceUsd = await container.solPriceOracle.getSolPriceUsd();
+              const pnlUsd = -Number(entrySolLamports) / 1e9 * solPriceUsd; // 0 exit = full loss
+              container.cooldownManager.activateCooldown();
+              logger.info('Reconciler — cooldown activated after manual sell detection', {
+                tradeId: trade.id,
+                pnlUsd: pnlUsd.toFixed(4),
+              });
+            } catch {
+              container.cooldownManager.activateCooldown();
+            }
           }
 
           // Remove from monitoring

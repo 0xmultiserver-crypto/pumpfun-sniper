@@ -106,7 +106,7 @@ describe('BundleDetector', () => {
 
     const pct = detector.forceAnalyze(MINT);
     expect(signals).toHaveLength(0);
-    expect(pct).toBe(0);
+    expect(pct).toBeNull();
   });
 
   // -------------------------------------------------------------------------
@@ -451,9 +451,9 @@ describe('BundleDetector', () => {
   // Edge cases
   // -------------------------------------------------------------------------
 
-  it('returns 0 when no buys recorded', () => {
+  it('returns null when no buys recorded', () => {
     const pct = detector.forceAnalyze('NonExistentMint111111111111111111111111');
-    expect(pct).toBe(0);
+    expect(pct).toBeNull();
     expect(signals).toHaveLength(0);
   });
 
@@ -461,7 +461,7 @@ describe('BundleDetector', () => {
     detector.stop();
     detector.handleBuy(makeBuy());
     const pct = detector.forceAnalyze(MINT);
-    expect(pct).toBe(0);
+    expect(pct).toBeNull();
     expect(signals).toHaveLength(0);
   });
 

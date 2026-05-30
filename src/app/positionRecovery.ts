@@ -12,6 +12,7 @@ import type { TradeRecord } from '../core/types/trade.js';
 import type { MintAddress } from '../core/types/token.js';
 import { nowMs } from '../core/utils/time.js';
 import { createLogger } from '../telemetry/logging/logger.js';
+import { computeEntryPriceScaled } from '../core/utils/price.js';
 import { deriveUserATA } from '../adapters/protocols/pumpfun/pumpfunTradeBuilder.js';
 
 const logger = createLogger('app:positionRecovery');
@@ -61,7 +62,7 @@ export async function restoreOpenPositionsFromDb(
     }
 
     const entryTimestamp = trade.confirmedAt ?? trade.submittedAt ?? nowMs();
-    const entryPrice = (trade.amountSol * 10n ** 9n) / trade.amountTokens;
+    const entryPrice = computeEntryPriceScaled(trade.amountSol, trade.amountTokens);
 
     params.positionRegistry.register({
       id: trade.id,

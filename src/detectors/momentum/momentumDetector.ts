@@ -20,6 +20,7 @@ import {
   DEFAULT_MOMENTUM_COOLDOWN_MS,
   DEFAULT_MOMENTUM_MAX_TRACKED_TOKENS,
 } from '../../core/constants/defaults.js';
+import { SELL_PRESSURE_WINDOW_SECONDS } from '../../core/constants/defaults/detection.js';
 
 const logger = createLogger('detectors:momentum');
 
@@ -168,8 +169,9 @@ export class MomentumDetector implements IDetector {
         this.tokenStates.set(event.mint, state);
       }
       state.sells.push({ timestamp: event.timestamp });
-      // Trim expired sells
-      const sellCutoff = nowMs() - this.windowMs;
+      // Trim expired sells — use 60s window (longer than 10s momentum window)
+      // so Check 14 can detect dumps that happened before the momentum signal
+      const sellCutoff = nowMs() - SELL_PRESSURE_WINDOW_SECONDS * 1000;
       state.sells = state.sells.filter((s) => s.timestamp >= sellCutoff);
       return;
     }
@@ -244,7 +246,7 @@ export class MomentumDetector implements IDetector {
         const now = nowMs();
         if (now - state.lastSignalAt >= this.cooldownMs) {
           state.lastSignalAt = now;
-          const sellCount = state.sells.filter(s => s.timestamp >= nowMs() - this.windowMs).length;
+          const sellCount = state.sells.filter(s => s.timestamp >= nowMs() - SELL_PRESSURE_WINDOW_SECONDS * 1000).length;
           this.emitMomentumSignal(event.mint, buyCount, totalVolume, event.slot, uniqueSlotCount, uniqueWalletCount, sellCount);
         }
       }
@@ -285,6 +287,7 @@ export class MomentumDetector implements IDetector {
       signalId,
       mint,
       buyCount,
+      sellCount,
       volumeSol: volumeSol.toString(),
       windowSeconds: this.windowSeconds,
       uniqueWallets: uniqueWalletCount,

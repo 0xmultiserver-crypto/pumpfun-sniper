@@ -89,3 +89,51 @@ export const COMPUTE_BUDGET_PROGRAM_ID = new PublicKey(
 
 /** Pump.fun token decimals (standard SPL token default for Pump.fun). */
 export const PUMPFUN_TOKEN_DECIMALS = 6 as const;
+
+// ---------------------------------------------------------------------------
+// BonkFun / Raydium LaunchLab Constants
+// ---------------------------------------------------------------------------
+
+/**
+ * Raydium LaunchLab program ID (used by BonkFun / letsbonk.fun).
+ * Source: verified on-chain (mainnet) + Chainstack reference implementation.
+ */
+export const RAYDIUM_LAUNCHLAB_PROGRAM_ID = new PublicKey(
+  'LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj',
+);
+
+/**
+ * Raydium LaunchLab Global Config account.
+ * Source: verified from Chainstack reference implementation.
+ */
+export const LAUNCHLAB_GLOBAL_CONFIG = new PublicKey(
+  '6s1xP3hpbAfFoNtUNF8mfHsjr2Bd97JxFJRWLbL6aHuX',
+);
+
+/**
+ * BonkFun (letsbonk.fun) platform config within Raydium LaunchLab.
+ * This identifies BonkFun-specific trades on the LaunchLab program.
+ * Source: verified from Chainstack reference implementation.
+ */
+export const BONKFUN_PLATFORM_CONFIG = new PublicKey(
+  'FfYek5vEz23cMkWsdJwG2oa6EphsvXSHrGpdALN4g6W1',
+);
+
+/** WSOL mint address (native SOL wrapped). */
+export const WSOL_MINT = new PublicKey(
+  'So11111111111111111111111111111111111111112',
+);
+
+/** System rent sysvar. */
+export const SYSTEM_RENT_PROGRAM_ID = new PublicKey(
+  'SysvarRent111111111111111111111111111111111',
+);
+
+/**
+ * BonkFun token decimals.
+ * LaunchLab tokens default to 6 decimals (same as Pump.fun).
+ */
+export const BONKFUN_TOKEN_DECIMALS = 6 as const;
+
+/** Minimum pool state account data size for BonkFun (LaunchLab) tokens. */
+export const MIN_BONKFUN_POOL_STATE_SIZE = 375 as const;

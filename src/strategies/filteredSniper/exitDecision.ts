@@ -2,9 +2,12 @@
  * Exit Decision
  *
  * Evaluates whether a position should be exited based on:
- *   - Take profit (+500%)
- *   - Stop loss (-50%)
- *   - Timeout (60 minutes)
+ *   - Take profit (from constants)
+ *   - Stop loss (from constants)
+ *   - Trailing stop (activation + drop from constants)
+ *   - Scale-out (tiered partial profit taking)
+ *   - Anti-rug (suspicious holder dump)
+ *   - Timeout (from constants)
  *
  * All values are LOCKED in filteredSniperRules.ts.
  *
@@ -71,6 +74,8 @@ export interface ExitDecisionResult {
   readonly explanation: string;
   /** Percentage of current balance to sell (default 100). Used by SCALE_OUT. */
   readonly sellPct?: number;
+  /** Scale-out tier index (0-based). Used to track completed tiers. */
+  readonly tierIndex?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +160,7 @@ export function evaluateExit(data: PositionData): ExitDecisionResult {
           pnlPercent,
           elapsedMs,
           sellPct: tier.sellPct,
+          tierIndex: i,
           explanation: `Scale-out tier ${i + 1}: P&L ${pnlPercent.toFixed(2)}% >= +${tier.triggerPct}% — sell ${tier.sellPct}% of position`,
         };
       }
@@ -162,14 +168,28 @@ export function evaluateExit(data: PositionData): ExitDecisionResult {
   }
 
   // --- Check 2: Trailing stop (activates after TRAILING_ACTIVATION_PCT profit) ---
-  // Trails from highest price seen. Only active when position has reached activation threshold.
-  if (TRAILING_STOP_PCT > 0 && data.highestPriceLamports && data.entryPriceLamports > 0n) {
+  // Trails from highest price seen. Dynamic tightening as profit increases.
+  // ONLY triggers when all scale-out tiers are completed (to avoid selling 100% while tiers remain).
+  const allScaleOutTiersDone = !SCALE_OUT_ENABLED || (data.scaleOutTiersCompleted?.length ?? 0) >= SCALE_OUT_TIERS.length;
+  if (TRAILING_STOP_PCT > 0 && data.highestPriceLamports && data.entryPriceLamports > 0n && allScaleOutTiersDone) {
     const highestPnlBps = ((data.highestPriceLamports - data.entryPriceLamports) * 10000n) / data.entryPriceLamports;
     const activationBps = BigInt(TRAILING_ACTIVATION_PCT * 100);
     // Only trail if highest exceeded activation threshold
     if (highestPnlBps >= activationBps) {
+      // Dynamic trailing: tighten as profit increases
+      const highestPnlPercent = Number(highestPnlBps) / 100;
+      let dynamicTrailingPct: number;
+      if (highestPnlPercent >= 1000) {
+        dynamicTrailingPct = 20; // At 1000%+, trail by 20%
+      } else if (highestPnlPercent >= 500) {
+        dynamicTrailingPct = 30; // At 500%+, trail by 30%
+      } else if (highestPnlPercent >= 200) {
+        dynamicTrailingPct = 40; // At 200%+, trail by 40%
+      } else {
+        dynamicTrailingPct = TRAILING_STOP_PCT; // Default (50%)
+      }
       // Trailing stop price = highest * (100 - trailingPct) / 100
-      const trailingStopPrice = (data.highestPriceLamports * BigInt(100 - TRAILING_STOP_PCT)) / 100n;
+      const trailingStopPrice = (data.highestPriceLamports * BigInt(100 - dynamicTrailingPct)) / 100n;
       if (data.currentPriceLamports <= trailingStopPrice) {
         const trailingPnlBps = ((data.currentPriceLamports - data.entryPriceLamports) * 10000n) / data.entryPriceLamports;
         const trailingPnlPercent = Number(trailingPnlBps) / 100;
@@ -180,14 +200,15 @@ export function evaluateExit(data: PositionData): ExitDecisionResult {
           currentPrice: data.currentPriceLamports.toString(),
           trailingStopPrice: trailingStopPrice.toString(),
           pnlPercent: trailingPnlPercent.toFixed(2),
-          trailingStopPct: TRAILING_STOP_PCT,
+          dynamicTrailingPct,
+          highestPnlPercent: highestPnlPercent.toFixed(2),
         });
         return {
           shouldExit: true,
           reason: 'TRAILING_STOP',
           pnlPercent: trailingPnlPercent,
           elapsedMs,
-          explanation: `Trailing stop triggered: price dropped ${TRAILING_STOP_PCT}% from high (PNL ${trailingPnlPercent.toFixed(2)}%)`,
+          explanation: `Trailing stop triggered: price dropped ${dynamicTrailingPct}% from ${highestPnlPercent.toFixed(0)}% high (PNL ${trailingPnlPercent.toFixed(2)}%)`,
         };
       }
     }
@@ -226,8 +247,8 @@ export function evaluateExit(data: PositionData): ExitDecisionResult {
     };
   }
 
-  // --- Check 4: Take profit ---
-  if (pnlPercent >= TAKE_PROFIT_PERCENT) {
+  // --- Check 4: Take profit (only after all scale-out tiers completed) ---
+  if (pnlPercent >= TAKE_PROFIT_PERCENT && allScaleOutTiersDone) {
     logger.info('Exit decision: TAKE PROFIT triggered', {
       tradeId: data.tradeId,
       mint: data.mint,

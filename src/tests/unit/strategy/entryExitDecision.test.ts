@@ -44,7 +44,7 @@ function makeEntryData(overrides?: Partial<EntryCheckData>): EntryCheckData {
     buyCountInWindow: MOMENTUM_MIN_BUYS,
     volumeLamports: MOMENTUM_MIN_VOLUME_LAMPORTS,
     windowMs: MOMENTUM_WINDOW_MS,
-    priceImpactBps: null,
+    priceImpactBps: 100, // 1% — within limit
     bundlePct: 10,
     washTradeScore: 20,
     uniqueWallets: 15,
@@ -52,6 +52,7 @@ function makeEntryData(overrides?: Partial<EntryCheckData>): EntryCheckData {
     realSolReservesLamports: 1_000_000_000n,
     holderCount: 50,
     marketCapUsd: 50000,
+    volumeUsd: 5000,
     ...overrides,
   };
 }
@@ -77,8 +78,8 @@ function makePositionData(overrides?: Partial<PositionData>): PositionData {
 // ---------------------------------------------------------------------------
 
 describe('evaluateEntry', () => {
-  it('ENTRY_CHECK_COUNT is 18', () => {
-    expect(ENTRY_CHECK_COUNT).toBe(18);
+  it('ENTRY_CHECK_COUNT is 19', () => {
+    expect(ENTRY_CHECK_COUNT).toBe(19);
   });
 
   it('allows entry when all checks pass', () => {
@@ -86,7 +87,7 @@ describe('evaluateEntry', () => {
     const result = evaluateEntry(data);
     expect(result.allowed).toBe(true);
     expect(result.failedCount).toBe(0);
-    expect(result.passedCount).toBe(18);
+    expect(result.passedCount).toBe(19);
   });
 
   it('rejects when mintAuthorityRevoked is false', () => {
@@ -117,7 +118,7 @@ describe('evaluateEntry', () => {
   it('always returns exactly 18 checks', () => {
     const data = makeEntryData();
     const result = evaluateEntry(data);
-    expect(result.checks.length).toBe(18)
+    expect(result.checks.length).toBe(19)
   });
 
   it('firstFailure is null when all pass', () => {
@@ -149,7 +150,7 @@ describe('evaluateExit', () => {
     const data = makePositionData({
       entryPriceLamports: 1_000_000_000n,
       currentPriceLamports: priceAtPct(1_000_000_000n, TAKE_PROFIT_PERCENT),
-      scaleOutTiersCompleted: [0, 1], // All scale-out tiers done by index, so TAKE_PROFIT fires
+      scaleOutTiersCompleted: [0, 1, 2], // All scale-out tiers done by index, so TAKE_PROFIT fires
     });
     const result = evaluateExit(data);
     expect(result.shouldExit).toBe(true);
@@ -279,6 +280,7 @@ describe('evaluateExit', () => {
       entryPriceLamports: 1_000_000_000n,
       highestPriceLamports: 2_000_000_000n,
       currentPriceLamports: 950_000_000n,
+      scaleOutTiersCompleted: [0, 1, 2],
     });
     const result = evaluateExit(data);
     expect(result.shouldExit).toBe(true);
@@ -299,13 +301,13 @@ describe('evaluateExit', () => {
   });
 
   it('TRAILING_STOP only activates when highest > entry', () => {
-    // Entry=100, highest=95 (below entry), current=45
+    // Entry=100, highest=95 (below entry), current=15
     // Trailing should NOT activate because highest never exceeded entry
-    // PnL = -55% → STOP_LOSS triggers at -50%
+    // PnL = -85% → STOP_LOSS triggers at -80%
     const data = makePositionData({
       entryPriceLamports: 1_000_000_000n,
       highestPriceLamports: 950_000_000n,
-      currentPriceLamports: 450_000_000n,
+      currentPriceLamports: 150_000_000n,
     });
     const result = evaluateExit(data);
     expect(result.shouldExit).toBe(true);
@@ -320,6 +322,7 @@ describe('evaluateExit', () => {
       entryPriceLamports: 1_000_000_000n,
       highestPriceLamports: 2_000_000_000n,
       currentPriceLamports: 900_000_000n,
+      scaleOutTiersCompleted: [0, 1, 2],
     });
     const result = evaluateExit(data);
     expect(result.shouldExit).toBe(true);
@@ -361,14 +364,14 @@ describe('isExpectedBuyBlock', () => {
 // ---------------------------------------------------------------------------
 
 describe('price impact check (check 10)', () => {
-  it('passes when priceImpactBps is null (data unavailable)', () => {
+  it('blocks when priceImpactBps is null (data unavailable)', () => {
     const data = makeEntryData({ priceImpactBps: null });
     const result = evaluateEntry(data);
-    expect(result.allowed).toBe(true);
+    expect(result.allowed).toBe(false);
     const piCheck = result.checks.find(c => c.name === 'price_impact_acceptable');
     expect(piCheck).toBeDefined();
-    expect(piCheck!.passed).toBe(true);
-    expect(piCheck!.reason).toContain('unavailable');
+    expect(piCheck!.passed).toBe(false);
+    expect(piCheck!.reason).toContain('BLOCKING');
   });
 
   it('passes when priceImpactBps is at the limit', () => {

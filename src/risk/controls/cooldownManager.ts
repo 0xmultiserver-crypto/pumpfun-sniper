@@ -62,9 +62,18 @@ export class CooldownManager {
    * Activate cooldown (call after a stop loss exit).
    */
   activateCooldown(): void {
-    this.cooldownExpiresAt = nowMs() + this.cooldownMs;
+    this.activateCooldownForDuration(this.cooldownMs / 1000);
+  }
+
+  /**
+   * Activate cooldown for a specific duration (in seconds).
+   * Used to differentiate cooldown lengths by exit reason.
+   */
+  activateCooldownForDuration(seconds: number): void {
+    const durationMs = seconds * 1000;
+    this.cooldownExpiresAt = nowMs() + durationMs;
     logger.info('Cooldown activated', {
-      durationMs: this.cooldownMs,
+      durationMs,
       expiresAt: this.cooldownExpiresAt,
     });
 

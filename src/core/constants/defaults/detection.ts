@@ -12,7 +12,7 @@
 export const DEFAULT_MOMENTUM_MIN_BUYS = 10 as const;
 
 /** Momentum entry filter — LOCKED: buy-count window in seconds */
-export const DEFAULT_MOMENTUM_WINDOW_SECONDS = 10 as const;
+export const DEFAULT_MOMENTUM_WINDOW_SECONDS = 30 as const;
 
 /** Momentum entry filter — LOCKED: minimum buy volume in lamports */
 export const DEFAULT_MOMENTUM_MIN_VOLUME_LAMPORTS = 2_000_000_000n as const;
@@ -22,6 +22,13 @@ export const DEFAULT_MOMENTUM_COOLDOWN_MS = 60_000 as const;
 
 /** Momentum detector max tokens to track simultaneously */
 export const DEFAULT_MOMENTUM_MAX_TRACKED_TOKENS = 500 as const;
+
+/**
+ * Sell pressure window in seconds — LONGER than momentum window (10s).
+ * Keeps sells for 60s so Check 14 can detect dumps that happened
+ * just before the momentum signal fired.
+ */
+export const SELL_PRESSURE_WINDOW_SECONDS = 60 as const;
 
 // ---------------------------------------------------------------------------
 // Creator history entry filter
@@ -61,10 +68,10 @@ export const DEFAULT_MAX_SYMBOL_LENGTH = 12 as const;
 
 /** Scam patterns in token names/symbols (case-insensitive, financial scams) */
 export const DEFAULT_METADATA_SCAM_PATTERNS: readonly RegExp[] = [
-  /rug/i, /scam/i, /honeypot/i, /ponzi/i, /fake/i,
+  /\brug\b/i, /\bscam\b/i, /\bhoneypot\b/i, /\bponzi\b/i, /\bfake\b/i,
   /airdrop.*claim/i, /connect.*wallet/i, /seed.*phrase/i,
-  /private.*key/i, /send.*sol.*back/i, /doubler/i,
-  /guaranteed/i, /free.*sol/i,
+  /private.*key/i, /send.*sol.*back/i, /\bdoubler\b/i,
+  /\bguaranteed\b/i, /free.*sol/i,
 ] as const;
 
 /** Structural metadata patterns (keyboard mash, test, repeated chars) */
@@ -80,7 +87,7 @@ export const DEFAULT_METADATA_STRUCTURAL_PATTERNS: readonly RegExp[] = [
 // ---------------------------------------------------------------------------
 
 /** Wallet concentration: max % top N holders can own (0-100) */
-export const DEFAULT_MAX_WALLET_CONCENTRATION_PCT = 60 as const;
+export const DEFAULT_MAX_WALLET_CONCENTRATION_PCT = 75 as const;
 
 /** Wallet concentration: number of top holders to check */
 export const DEFAULT_WALLET_CONCENTRATION_TOP_N = 5 as const;

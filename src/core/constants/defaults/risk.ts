@@ -12,7 +12,7 @@
 export const DEFAULT_DAILY_KILL_LIMIT_USD = 40 as const;
 
 /** Cooldown after exit — 2 minutes (120 seconds). Triggers on all exits except SCALE_OUT. */
-export const DEFAULT_COOLDOWN_AFTER_SL_SECONDS = 120 as const;
+export const DEFAULT_COOLDOWN_AFTER_SL_SECONDS = 10 as const;
 
 // ---------------------------------------------------------------------------
 // Anti-Rug Mechanism

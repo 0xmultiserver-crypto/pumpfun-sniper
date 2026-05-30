@@ -60,6 +60,7 @@ import { MaxExposureGuard } from '../risk/exposure/maxExposureGuard.js';
 import type { PositionProvider } from '../risk/exposure/maxExposureGuard.js';
 import { CreatorBlacklist } from '../risk/blacklist/creatorBlacklist.js';
 import { TokenBlacklist } from '../risk/blacklist/tokenBlacklist.js';
+import { AntiRugMonitor } from '../risk/controls/antiRug.js';
 
 import { SolPriceOracle } from './solPriceOracle.js';
 
@@ -68,6 +69,7 @@ import { SolPriceOracle } from './solPriceOracle.js';
 // ---------------------------------------------------------------------------
 import { TxBuilder } from '../execution/tx/txBuilder.js';
 import { PumpfunVenue } from '../execution/venues/pumpfunVenue.js';
+import { BonkfunVenue } from '../execution/venues/bonkfunVenue.js';
 import { JupiterVenue } from '../execution/venues/jupiterVenue.js';
 import { RpcSender } from '../execution/sender/rpcSender.js';
 import { SendCoordinator } from '../execution/sender/sendCoordinator.js';
@@ -159,8 +161,10 @@ export class ServiceContainer {
   private _rpcSender: RpcSender | null = null;
   private _sendCoordinator: SendCoordinator | null = null;
   private _pumpfunVenue: PumpfunVenue | null = null;
+  private _bonkfunVenue: BonkfunVenue | null = null;
   private _jupiterVenue: JupiterVenue | null = null;
   private _solPriceOracle: SolPriceOracle | null = null;
+  private _antiRugMonitor: AntiRugMonitor | null = null;
 
   constructor(config: AppConfig) {
     this.config = config;
@@ -367,6 +371,13 @@ export class ServiceContainer {
     return this._tokenBlacklist;
   }
 
+  get antiRugMonitor(): AntiRugMonitor {
+    if (this._antiRugMonitor === null) {
+      this._antiRugMonitor = new AntiRugMonitor(this.connection);
+    }
+    return this._antiRugMonitor;
+  }
+
   // -----------------------------------------------------------------------
   // Execution
   // -----------------------------------------------------------------------
@@ -397,6 +408,13 @@ export class ServiceContainer {
       this._pumpfunVenue = new PumpfunVenue();
     }
     return this._pumpfunVenue;
+  }
+
+  get bonkfunVenue(): BonkfunVenue {
+    if (this._bonkfunVenue === null) {
+      this._bonkfunVenue = new BonkfunVenue();
+    }
+    return this._bonkfunVenue;
   }
 
   get jupiterVenue(): JupiterVenue {
@@ -447,6 +465,10 @@ export class ServiceContainer {
 
   async destroy(): Promise<void> {
     logger.info('Destroying service container');
+    // Stop all anti-rug monitoring before shutting down
+    if (this._antiRugMonitor !== null) {
+      this._antiRugMonitor.stopAll();
+    }
     const errors: string[] = [];
 
     try {

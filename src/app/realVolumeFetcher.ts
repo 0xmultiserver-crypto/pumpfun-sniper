@@ -20,6 +20,7 @@ const logger = createLogger('app:realVolume');
 
 const volumeCache = new Map<string, { volumeUsd: number; timestamp: number }>();
 const CACHE_TTL_MS = 120_000; // 2 minutes
+const MAX_CACHE_SIZE = 1000;
 
 // ---------------------------------------------------------------------------
 // Rate limiter
@@ -121,7 +122,11 @@ async function fetchVolume(mint: string): Promise<number | null> {
 
     const volume1h = pair.volume?.h1 ?? 0;
 
-    // Cache
+    // Cache (evict oldest if at capacity)
+    if (volumeCache.size >= MAX_CACHE_SIZE) {
+      const oldest = volumeCache.keys().next().value;
+      if (oldest) volumeCache.delete(oldest);
+    }
     volumeCache.set(mint, { volumeUsd: volume1h, timestamp: Date.now() });
     logger.debug('Real volume fetched', { mint: mint.slice(0, 12), volume1h });
 

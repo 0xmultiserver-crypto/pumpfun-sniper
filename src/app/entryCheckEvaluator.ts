@@ -11,6 +11,8 @@ import type { WalletAddress } from '../core/types/wallet.js';
 import type { LaunchSignal } from '../core/types/signal.js';
 import { AuthorityInspector } from '../adapters/protocols/pumpfun/authorityInspector.js';
 import { parseTokenMetadata, parseBondingCurveData } from '../adapters/protocols/pumpfun/tokenParser.js';
+import { parsePoolStateData } from '../adapters/protocols/bonkfun/tokenParser.js';
+import { BONKFUN_PLATFORM_CONFIG, MIN_BONKFUN_POOL_STATE_SIZE } from '../core/constants/programs.js';
 import {
   DEFAULT_MIN_SOL_RESERVES,
   DEFAULT_MIN_TOKEN_RESERVES,
@@ -50,10 +52,12 @@ export function evaluateAuthority(
   return { mintAuthorityRevoked: false, freezeAuthorityRevoked: false };
 }
 
-/** Check 7: Evaluate liquidity sanity from raw bonding curve account. */
+/** Check 7: Evaluate liquidity sanity from raw bonding curve or LaunchLab pool state. */
 export function evaluateLiquidity(
   bondingCurveAccount: AccountInfo<Buffer> | null,
+  poolStateAccount?: AccountInfo<Buffer> | null,
 ): { liquiditySane: boolean; bondingCurveCreator: string | null } {
+  // PumpFun bonding curve check (existing logic)
   if (bondingCurveAccount?.data && bondingCurveAccount.data.length >= 49) {
     const parsed = parseBondingCurveData(bondingCurveAccount.data);
     if (parsed) {
@@ -64,6 +68,23 @@ export function evaluateLiquidity(
       return { liquiditySane: sane, bondingCurveCreator: creator };
     }
   }
+
+  // BonkFun / LaunchLab pool state check
+  if (poolStateAccount?.data && poolStateAccount.data.length >= MIN_BONKFUN_POOL_STATE_SIZE) {
+    try {
+      const parsed = parsePoolStateData(Buffer.from(poolStateAccount.data));
+      if (parsed && parsed.platformConfig.equals(BONKFUN_PLATFORM_CONFIG)) {
+        const creator = parsed.creator?.toBase58() ?? null;
+        const sane = parsed.realQuote >= DEFAULT_MIN_SOL_RESERVES
+          && parsed.realBase >= DEFAULT_MIN_TOKEN_RESERVES
+          && !parsed.complete;
+        return { liquiditySane: sane, bondingCurveCreator: creator };
+      }
+    } catch {
+      // Parse failed — fall through
+    }
+  }
+
   return { liquiditySane: false, bondingCurveCreator: null };
 }
 

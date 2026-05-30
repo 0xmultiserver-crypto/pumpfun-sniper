@@ -11,7 +11,7 @@ import type { ComputeBudgetParams } from '../../types/execution.js';
 // ---------------------------------------------------------------------------
 
 /** Fallback SOL/USD price if all sources fail. Updated 2026-05-29. */
-export const SOL_FALLBACK_PRICE_USD = 85 as const;
+export const SOL_FALLBACK_PRICE_USD = 150 as const; // Updated 2026-05-29 — was $85, real ~$150-180
 
 /** Jupiter Price API for SOL. */
 export const JUPITER_PRICE_URL = 'https://price.jup.ag/v6/price?ids=SOL' as const;

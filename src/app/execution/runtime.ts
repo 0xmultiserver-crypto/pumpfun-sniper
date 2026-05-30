@@ -19,5 +19,5 @@ export interface ExecutionRuntime {
     blockhash?: string,
     lastValidBlockHeight?: number,
   ): Promise<string | null>;
-  computePositionSizeLamports(solPriceUsd: number): bigint;
+  computePositionSizeLamports(solPriceUsd: number, positionSizeUsd?: number): bigint;
 }

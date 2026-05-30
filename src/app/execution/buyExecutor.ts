@@ -3,7 +3,9 @@ import type { BuyParams, BuyResult } from '../../strategies/filteredSniper/filte
 import type { MintAddress, BondingCurveState } from '../../core/types/token.js';
 import type { TradeRecord } from '../../core/types/trade.js';
 import { createLogger } from '../../telemetry/logging/logger.js';
+import { MIN_BONKFUN_POOL_STATE_SIZE } from '../../core/constants/programs.js';
 import { nowMs } from '../../core/utils/time.js';
+import { computeEntryPriceScaled } from '../../core/utils/price.js';
 import { deriveBondingCurvePDA } from '../../adapters/protocols/pumpfun/shared.js';
 import { parseBondingCurveData } from '../../adapters/protocols/pumpfun/tokenParser.js';
 
@@ -129,7 +131,7 @@ export async function executeBuy(params: BuyParams, runtime: ExecutionRuntime): 
   // ── Position Sizing ─────────────────────────────────────────────
   // Fetch live SOL price from oracle
   const solPriceUsd = await container.solPriceOracle.getSolPriceUsd();
-  const positionSizeLamports = computePositionSizeLamports(solPriceUsd);
+  const positionSizeLamports = computePositionSizeLamports(solPriceUsd, params.positionSizeUsd);
 
   logger.info('EXECUTE BUY — building TX', {
     mint: params.mint,
@@ -196,10 +198,240 @@ export async function executeBuy(params: BuyParams, runtime: ExecutionRuntime): 
     balanceSol: (walletBalance / 1e9).toFixed(6),
   });
 
-  // ── Retry Loop ───────────────────────────────────────────────────
+  // ── Venue Detection: BonkFun vs PumpFun ──────────────────────────
   let lastError: string | null = null;
   let lastSignature: string | null = null;
 
+  // Check if this token is a BonkFun (Raydium LaunchLab) token.
+  // If pool state PDA exists with BonkFun platform config → route to BonkFun buy.
+  const { derivePoolStatePDA: deriveBonkfunPoolPDA } = await import('../../adapters/protocols/bonkfun/shared.js');
+  const { parsePoolStateData, isBonkfunToken } = await import('../../adapters/protocols/bonkfun/tokenParser.js');
+
+  const bonkfunPoolPDA = deriveBonkfunPoolPDA(mint);
+  const bonkfunPoolAccount = await container.connection.getAccountInfo(bonkfunPoolPDA);
+
+  if (bonkfunPoolAccount?.data && bonkfunPoolAccount.data.length >= MIN_BONKFUN_POOL_STATE_SIZE) {
+    const parsedPool = parsePoolStateData(Buffer.from(bonkfunPoolAccount.data), mint.toBase58());
+    if (parsedPool && isBonkfunToken(parsedPool)) {
+      logger.info('BonkFun token detected — routing to BonkFun buy', { tradeId, mint: params.mint });
+
+      const { buildBonkfunBuyInstructions } = await import('./bonkfunBuyExecutor.js');
+      const runtimeForBonkfun: ExecutionRuntime = {
+        container,
+        positionRegistry,
+        pumpSdk,
+        maxTxRetries: MAX_TX_RETRIES,
+        retryDelayMs: RETRY_DELAY_MS,
+        delay,
+        getMintTokenProgram,
+        getUserTokenBalance: (async () => 0n) as any, // Stub: BonkFun path has own balance check
+        confirmSubmittedTransaction: (async () => null) as any, // Stub: BonkFun path has own confirmation (lines 288-336)
+        isPermanentError,
+        nextTradeId: () => tradeId,
+        computePositionSizeLamports: () => positionSizeLamports,
+      };
+      const bonkfunResult = await buildBonkfunBuyInstructions({
+        runtime: runtimeForBonkfun,
+        mint,
+        user,
+        solAmount: positionSizeLamports,
+      });
+
+      if (!bonkfunResult) {
+        positionRegistry.transition(tradeId, 'EXITED', 'BonkFun pool invalid or graduated');
+        return { success: false, tradeId, signature: null, error: 'Failed to build BonkFun buy instructions' };
+      }
+
+      // Execute BonkFun buy with retry
+      for (let attempt = 0; attempt <= MAX_TX_RETRIES; attempt++) {
+        if (attempt > 0) {
+          logger.info('Retrying BonkFun buy', { tradeId, attempt });
+          await delay(RETRY_DELAY_MS);
+        }
+
+        try {
+          // Balance re-check before submit
+          const currentBalance = await container.connection.getBalance(user);
+          const minRequiredAtSubmit = positionSizeLamports + 2_039_280n + 500_000n;
+          if (BigInt(currentBalance) < minRequiredAtSubmit) {
+            logger.warn('BonkFun BUY BLOCKED — balance insufficient at submit', { tradeId });
+            positionRegistry.transition(tradeId, 'EXITED', 'insufficient balance at submit');
+            return { success: false, tradeId, signature: null, error: 'Balance insufficient at submit time' };
+          }
+
+          const txResult = await container.txBuilder.build({
+            feePayer: user,
+            instructions: bonkfunResult.instructions,
+          });
+
+          const sendResult = await container.sendCoordinator.signAndSend({
+            tradeId: `bonkfun-buy-${tradeId}-attempt-${attempt}`,
+            transaction: txResult.transaction,
+          });
+
+          if (sendResult.error) {
+            lastError = sendResult.error;
+            logger.error('BonkFun BUY FAILED', { tradeId, attempt, error: sendResult.error });
+            if (isPermanentError(sendResult.error)) break;
+            continue;
+          }
+
+          const signature = sendResult.sendResult?.signature ?? null;
+          if (!signature) {
+            lastError = 'Send succeeded but no signature returned';
+            logger.error('BonkFun BUY FAILED — no signature', { tradeId, attempt });
+            continue;
+          }
+
+          lastSignature = signature;
+
+          // ── TX Confirmation (same pattern as PumpFun) ──────────────
+          logger.info('BonkFun TX submitted, waiting for confirmation...', { tradeId, signature });
+          try {
+            const confirmation = await container.connection.confirmTransaction(
+              { signature, blockhash: txResult.blockhash, lastValidBlockHeight: txResult.lastValidBlockHeight },
+              'confirmed',
+            );
+            if (confirmation.value.err) {
+              const onChainErr = JSON.stringify(confirmation.value.err);
+              lastError = onChainErr;
+              logger.error('BonkFun TX FAILED ON-CHAIN', { tradeId, signature, attempt, onChainError: onChainErr });
+              if (isPermanentError(onChainErr)) break;
+              continue;
+            }
+            logger.info('BonkFun TX CONFIRMED ON-CHAIN!', { tradeId, signature });
+          } catch (confirmErr: unknown) {
+            const cmsg = confirmErr instanceof Error ? confirmErr.message : String(confirmErr);
+            lastError = cmsg;
+            logger.error('BonkFun TX CONFIRMATION FAILED', { tradeId, signature, attempt, error: cmsg });
+
+            // CRITICAL: Check if TX actually landed before retrying (prevent double-buy)
+            try {
+              const status = await container.connection.getSignatureStatus(signature);
+              if (status?.value?.confirmationStatus === 'confirmed' ||
+                  status?.value?.confirmationStatus === 'finalized') {
+                logger.warn('BonkFun TX actually confirmed despite error — proceeding', { tradeId, signature });
+              } else if (status?.value?.err) {
+                logger.info('BonkFun TX confirmed as failed — safe to retry', { tradeId, signature });
+                if (isPermanentError(cmsg)) break;
+                continue;
+              } else {
+                await new Promise((resolve) => setTimeout(resolve, 2000));
+                const recheck = await container.connection.getSignatureStatus(signature);
+                if (recheck?.value?.confirmationStatus === 'confirmed' ||
+                    recheck?.value?.confirmationStatus === 'finalized') {
+                  logger.warn('BonkFun TX confirmed on recheck — proceeding', { tradeId, signature });
+                } else {
+                  logger.warn('BonkFun TX still unconfirmed — retrying', { tradeId, signature });
+                  if (isPermanentError(cmsg)) break;
+                  continue;
+                }
+              }
+            } catch (statusErr: unknown) {
+              logger.error('Failed to check BonkFun TX status — retrying', {
+                tradeId, signature,
+                error: statusErr instanceof Error ? statusErr.message : String(statusErr),
+              });
+              if (isPermanentError(cmsg)) break;
+              continue;
+            }
+          }
+
+          // ── On-chain Accounting ────────────────────────────────────
+          // Get actual SOL spent from the confirmed transaction
+          let actualAmountSol = positionSizeLamports;
+          try {
+            const accounting = await getConfirmedBuyAmountSol({
+              connection: container.connection,
+              signature,
+              wallet: user,
+              fallbackLamports: positionSizeLamports,
+              tradeId,
+            });
+            actualAmountSol = accounting.amountSolLamports;
+          } catch {
+            logger.warn('BonkFun on-chain accounting failed — using fallback', { tradeId });
+          }
+
+          logger.info('BonkFun BUY confirmed', {
+            tradeId,
+            signature,
+            expectedTokens: bonkfunResult.expectedTokenOut.toString(),
+            actualSolSpent: actualAmountSol.toString(),
+          });
+
+          // Register position (entryPriceSol = per-token price in lamports)
+          const entryTokens = bonkfunResult.expectedTokenOut;
+          positionRegistry.register({
+            id: tradeId,
+            mint: params.mint as any,
+            status: 'ENTERED' as any,
+            tradeId,
+            entryAmountSol: actualAmountSol,
+            entryAmountTokens: entryTokens,
+            entryPriceSol: computeEntryPriceScaled(actualAmountSol, entryTokens),
+            entryTimestamp: Date.now(),
+            currentPnlPercent: null,
+            exitReason: null,
+            createdAt: nowMs(),
+            updatedAt: nowMs(),
+          } as any);
+
+          // Save trade to DB
+          try {
+            await saveTrade(container, {
+              id: tradeId as any,
+              mint: params.mint,
+              side: 'BUY' as any,
+              status: 'CONFIRMED' as any,
+              amountSol: actualAmountSol,
+              amountTokens: bonkfunResult.expectedTokenOut,
+              signature,
+              slot: null,
+              submittedAt: Date.now(),
+              confirmedAt: Date.now(),
+              failureReason: null,
+            });
+          } catch (saveErr: unknown) {
+            logger.error('Failed to save BonkFun buy trade', {
+              tradeId,
+              error: saveErr instanceof Error ? saveErr.message : String(saveErr),
+            });
+          }
+
+          // Record trade in throttle (prevents exceeding trade rate limit)
+          container.tradeThrottle.recordTrade();
+
+          return { success: true, tradeId, signature, error: null };
+        } catch (err: unknown) {
+          lastError = err instanceof Error ? err.message : String(err);
+          logger.error('BonkFun buy attempt error', { tradeId, attempt, error: lastError });
+        }
+      }
+
+      // All retries exhausted — save FAILED record to DB
+      logger.error('BonkFun BUY failed after all retries', { tradeId, lastError });
+      try {
+        await saveTrade(container, {
+          id: tradeId as any,
+          mint: params.mint,
+          side: 'BUY' as any,
+          status: 'FAILED' as any,
+          amountSol: 0n,
+          amountTokens: 0n,
+          signature: lastSignature,
+          slot: null,
+          submittedAt: Date.now(),
+          confirmedAt: null,
+          failureReason: lastError,
+        });
+      } catch {}
+      positionRegistry.transition(tradeId, 'EXITED', `bonkfun buy failed: ${lastError}`);
+      return { success: false, tradeId, signature: lastSignature, error: lastError };
+    }
+  }
+
+  // ── Retry Loop (PumpFun path) ───────────────────────────────────
   for (let attempt = 0; attempt <= MAX_TX_RETRIES; attempt++) {
     if (attempt > 0) {
       logger.info('Retrying TX with fresh blockhash', { tradeId, attempt });
@@ -496,7 +728,7 @@ export async function executeBuy(params: BuyParams, runtime: ExecutionRuntime): 
 
       // ── Position Tracking ─────────────────────────────────────────
       // Track position for exit monitoring using the confirmed swap cost.
-      const entryPrice = tokenAmount > 0n ? confirmedBuyAmountSol * 10n ** 9n / tokenAmount : 0n;
+      const entryPrice = computeEntryPriceScaled(confirmedBuyAmountSol, tokenAmount);
       positionRegistry.register({
         id: tradeId,
         mint: params.mint as MintAddress,

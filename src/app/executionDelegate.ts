@@ -43,8 +43,9 @@ export function isNonRetryableExecutionError(error: string): boolean {
 }
 
 /** Compute position size in lamports from current SOL price. */
-export function computePositionSizeLamports(solPriceUsd: number): bigint {
-  return BigInt(Math.floor((POSITION_SIZE_USD / solPriceUsd) * 1_000_000_000));
+export function computePositionSizeLamports(solPriceUsd: number, positionSizeUsd?: number): bigint {
+  const usd = positionSizeUsd ?? POSITION_SIZE_USD;
+  return BigInt(Math.floor((usd / solPriceUsd) * 1_000_000_000));
 }
 
 function delay(ms: number): Promise<void> {

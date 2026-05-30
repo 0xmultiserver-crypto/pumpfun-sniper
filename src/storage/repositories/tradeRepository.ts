@@ -143,7 +143,7 @@ export class TradeRepository implements IRepository<TradeRecord, TradeId> {
         WHERE b.side = 'BUY'
           AND b.status = 'CONFIRMED'
           AND b.amount_tokens > 0
-          AND b.confirmed_at > NOW() - INTERVAL '1 hour'
+          AND b.confirmed_at > NOW() - INTERVAL '24 hours'
           AND (
             -- No matching sell at all
             NOT EXISTS (
